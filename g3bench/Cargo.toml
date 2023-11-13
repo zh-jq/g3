@@ -29,6 +29,7 @@ tokio-openssl.workspace = true
 openssl.workspace = true
 openssl-probe = { workspace = true, optional = true }
 rustls.workspace = true
+rustls-pki-types.workspace = true
 rustls-pemfile.workspace = true
 cadence.workspace = true
 hdrhistogram.workspace = true
