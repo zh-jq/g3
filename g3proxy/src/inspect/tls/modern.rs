@@ -124,7 +124,7 @@ where
         let selected_alpn_protocol = ups_ssl.selected_alpn_protocol();
 
         // fetch fake server cert
-        let (clt_cert, clt_key) = clt_cert_handle
+        let cert_pair = clt_cert_handle
             .await
             .map_err(|e| {
                 TlsInterceptionError::NoFakeCertGenerated(anyhow!(
@@ -136,6 +136,7 @@ where
                     "failed to get fake upstream certificate"
                 ))
             })?;
+        let (clt_cert, clt_key) = cert_pair.into_inner();
 
         // build to client ssl context based on server response, and handshake
         let mut clt_server_config = rustls::ServerConfig::builder()
