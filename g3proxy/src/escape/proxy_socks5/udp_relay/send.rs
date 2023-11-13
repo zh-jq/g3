@@ -14,20 +14,26 @@
  * limitations under the License.
  */
 
-use std::io;
+use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::task::{ready, Context, Poll};
 
-use bytes::BufMut;
-
 use g3_io_ext::{AsyncUdpSend, UdpRelayRemoteError, UdpRelayRemoteSend};
-use g3_socks::v5::UdpOutput;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use g3_io_ext::{SendMsgHdr, UdpRelayPacket};
+use g3_socks::v5::SocksUdpHeader;
 use g3_types::net::UpstreamAddr;
 
 pub(crate) struct ProxySocks5UdpRelayRemoteSend<T> {
     local_addr: SocketAddr,
     peer_addr: SocketAddr,
     inner: T,
+    socks_headers: Vec<SocksUdpHeader>,
 }
 
 impl<T> ProxySocks5UdpRelayRemoteSend<T>
@@ -39,32 +45,28 @@ where
             local_addr,
             peer_addr,
             inner: send,
+            socks_headers: vec![SocksUdpHeader::default(); 4],
         }
     }
+}
 
+impl<T> UdpRelayRemoteSend for ProxySocks5UdpRelayRemoteSend<T>
+where
+    T: AsyncUdpSend + Send,
+{
     fn poll_send_packet(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-        buf_off: usize,
-        buf_len: usize,
+        buf: &[u8],
         to: &UpstreamAddr,
     ) -> Poll<Result<usize, UdpRelayRemoteError>> {
-        let header_len = UdpOutput::calc_header_len(to);
-        let nw = if header_len <= buf_off {
-            UdpOutput::generate_header(&mut buf[buf_off - header_len..buf_off], to);
-            ready!(self
-                .inner
-                .poll_send(cx, &buf[buf_off - header_len..buf_len]))
-            .map_err(|e| UdpRelayRemoteError::SendFailed(self.local_addr, self.peer_addr, e))?
-        } else {
-            let mut new_buf: Vec<u8> = Vec::with_capacity(buf_len - buf_off + header_len);
-            UdpOutput::generate_header(&mut new_buf[0..header_len], to);
-            unsafe { new_buf.set_len(header_len) }
-            new_buf.put_slice(&buf[buf_off..buf_len]);
-            ready!(self.inner.poll_send(cx, &new_buf))
-                .map_err(|e| UdpRelayRemoteError::SendFailed(self.local_addr, self.peer_addr, e))?
-        };
+        let socks_header = self.socks_headers.get_mut(0).unwrap();
+        let nw = ready!(self.inner.poll_sendmsg(
+            cx,
+            &[IoSlice::new(socks_header.encode(to)), IoSlice::new(buf)],
+            None
+        ))
+        .map_err(|e| UdpRelayRemoteError::SendFailed(self.local_addr, self.peer_addr, e))?;
         if nw == 0 {
             Poll::Ready(Err(UdpRelayRemoteError::SendFailed(
                 self.local_addr,
@@ -75,24 +77,42 @@ where
             Poll::Ready(Ok(nw))
         }
     }
-}
 
-impl<T> UdpRelayRemoteSend for ProxySocks5UdpRelayRemoteSend<T>
-where
-    T: AsyncUdpSend + Send,
-{
-    fn buf_reserve_length(&self) -> usize {
-        256 + 4 + 2
-    }
-
-    fn poll_send_packet(
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_send_packets(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-        buf_off: usize,
-        buf_len: usize,
-        to: &UpstreamAddr,
+        packets: &[UdpRelayPacket],
     ) -> Poll<Result<usize, UdpRelayRemoteError>> {
-        self.poll_send_packet(cx, buf, buf_off, buf_len, to)
+        if packets.len() > self.socks_headers.len() {
+            self.socks_headers.resize(packets.len(), Default::default());
+        }
+        let mut msgs = Vec::with_capacity(packets.len());
+        for (p, h) in packets.iter().zip(self.socks_headers.iter_mut()) {
+            msgs.push(SendMsgHdr {
+                iov: [
+                    IoSlice::new(h.encode(p.upstream())),
+                    IoSlice::new(p.payload()),
+                ],
+                addr: None,
+            });
+        }
+
+        let count = ready!(self.inner.poll_batch_sendmsg(cx, &msgs))
+            .map_err(|e| UdpRelayRemoteError::SendFailed(self.local_addr, self.peer_addr, e))?;
+        if count == 0 {
+            Poll::Ready(Err(UdpRelayRemoteError::SendFailed(
+                self.local_addr,
+                self.peer_addr,
+                io::Error::new(io::ErrorKind::WriteZero, "write zero packet into sender"),
+            )))
+        } else {
+            Poll::Ready(Ok(count))
+        }
     }
 }

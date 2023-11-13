@@ -20,6 +20,13 @@ use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
 use g3_io_ext::{AsyncUdpSend, UdpRelayRemoteError, UdpRelayRemoteSend};
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use g3_io_ext::{SendMsgHdr, UdpRelayPacket};
 use g3_resolver::{ResolveError, ResolveLocalError};
 use g3_types::acl::{AclAction, AclNetworkRule};
 use g3_types::net::{Host, UpstreamAddr};
@@ -90,24 +97,18 @@ where
     fn poll_send_packet(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-        buf_off: usize,
-        buf_len: usize,
+        buf: &[u8],
         to: &UpstreamAddr,
     ) -> Poll<Result<usize, UdpRelayRemoteError>> {
         if let Some(resolved_ip) = self.resolved_ip.take() {
             let port = self.resolved_port;
             let ret = match resolved_ip {
-                IpAddr::V4(_) => self.poll_send_v4_packet(
-                    cx,
-                    &buf[buf_off..buf_len],
-                    SocketAddr::new(resolved_ip, port),
-                ),
-                IpAddr::V6(_) => self.poll_send_v6_packet(
-                    cx,
-                    &buf[buf_off..buf_len],
-                    SocketAddr::new(resolved_ip, port),
-                ),
+                IpAddr::V4(_) => {
+                    self.poll_send_v4_packet(cx, buf, SocketAddr::new(resolved_ip, port))
+                }
+                IpAddr::V6(_) => {
+                    self.poll_send_v6_packet(cx, buf, SocketAddr::new(resolved_ip, port))
+                }
             };
             if ret.is_pending() {
                 self.resolved_ip = Some(resolved_ip);
@@ -123,7 +124,7 @@ where
                 }
                 Poll::Ready(Ok(ip)) => {
                     self.resolved_ip = Some(ip);
-                    self.poll_send_packet(cx, buf, buf_off, buf_len, to)
+                    self.poll_send_packet(cx, buf, to)
                 }
                 Poll::Ready(Err(e)) => {
                     if let Some(domain) = self.resolve_retry_domain.take() {
@@ -138,7 +139,7 @@ where
                                     )?;
                                     self.resolver_job = Some(resolver_job);
                                     // no retry by leaving resolve_retry_domain to None
-                                    self.poll_send_packet(cx, buf, buf_off, buf_len, to)
+                                    self.poll_send_packet(cx, buf, to)
                                 }
                                 Err(_) => Poll::Ready(Err(UdpRelayRemoteError::DomainNotResolved(
                                     ResolveError::FromLocal(ResolveLocalError::NoResolverRunning),
@@ -155,16 +156,12 @@ where
         }
 
         match to.host() {
-            Host::Ip(IpAddr::V4(ip)) => self.poll_send_v4_packet(
-                cx,
-                &buf[buf_off..buf_len],
-                SocketAddr::new(IpAddr::V4(*ip), to.port()),
-            ),
-            Host::Ip(IpAddr::V6(ip)) => self.poll_send_v6_packet(
-                cx,
-                &buf[buf_off..buf_len],
-                SocketAddr::new(IpAddr::V6(*ip), to.port()),
-            ),
+            Host::Ip(IpAddr::V4(ip)) => {
+                self.poll_send_v4_packet(cx, buf, SocketAddr::new(IpAddr::V4(*ip), to.port()))
+            }
+            Host::Ip(IpAddr::V6(ip)) => {
+                self.poll_send_v6_packet(cx, buf, SocketAddr::new(IpAddr::V6(*ip), to.port()))
+            }
             Host::Domain(domain) => {
                 self.resolved_port = to.port();
                 let resolver_job = ArriveFirstResolveJob::new(
@@ -174,7 +171,7 @@ where
                 )?;
                 self.resolver_job = Some(resolver_job);
                 self.resolve_retry_domain = Some(domain.to_string());
-                self.poll_send_packet(cx, buf, buf_off, buf_len, to)
+                self.poll_send_packet(cx, buf, to)
             }
         }
     }
@@ -267,24 +264,131 @@ where
             Poll::Ready(Err(UdpRelayRemoteError::AddressNotSupported))
         }
     }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_send_packets(
+        inner: &mut T,
+        bind_addr: SocketAddr,
+        cx: &mut Context<'_>,
+        packets: &[UdpRelayPacket],
+    ) -> Poll<Result<usize, UdpRelayRemoteError>> {
+        use std::io::IoSlice;
+
+        let msgs: Vec<SendMsgHdr<1>> = packets
+            .iter()
+            .map(|p| {
+                let addr = SocketAddr::try_from(p.upstream()).unwrap();
+                SendMsgHdr {
+                    iov: [IoSlice::new(p.payload())],
+                    addr: Some(addr),
+                }
+            })
+            .collect();
+        let count = ready!(inner.poll_batch_sendmsg(cx, &msgs))
+            .map_err(|e| UdpRelayRemoteError::BatchSendFailed(bind_addr, e))?;
+        if count == 0 {
+            Poll::Ready(Err(UdpRelayRemoteError::BatchSendFailed(
+                bind_addr,
+                io::Error::new(io::ErrorKind::WriteZero, "write zero packet into sender"),
+            )))
+        } else {
+            Poll::Ready(Ok(count))
+        }
+    }
 }
 
 impl<T> UdpRelayRemoteSend for DirectUdpRelayRemoteSend<T>
 where
     T: AsyncUdpSend + Send,
 {
-    fn buf_reserve_length(&self) -> usize {
-        0
-    }
-
     fn poll_send_packet(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-        buf_off: usize,
-        buf_len: usize,
+        buf: &[u8],
         to: &UpstreamAddr,
     ) -> Poll<Result<usize, UdpRelayRemoteError>> {
-        self.poll_send_packet(cx, buf, buf_off, buf_len, to)
+        self.poll_send_packet(cx, buf, to)
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_send_packets(
+        &mut self,
+        cx: &mut Context<'_>,
+        packets: &[UdpRelayPacket],
+    ) -> Poll<Result<usize, UdpRelayRemoteError>> {
+        let Some(p) = packets.first() else {
+            return Poll::Ready(Ok(0));
+        };
+
+        match p.upstream().host() {
+            Host::Domain(_) => {
+                let _ = ready!(self.poll_send_packet(cx, p.payload(), p.upstream()))?;
+                Poll::Ready(Ok(1))
+            }
+            Host::Ip(IpAddr::V4(_)) => {
+                let mut count = 0;
+                for p in packets {
+                    let ups = p.upstream();
+                    let Host::Ip(IpAddr::V4(ip4)) = ups.host() else {
+                        break;
+                    };
+
+                    if let Err(e) =
+                        self.check_egress_ip(SocketAddr::new(IpAddr::V4(*ip4), ups.port()))
+                    {
+                        if count == 0 {
+                            return Poll::Ready(Err(e));
+                        } else {
+                            break;
+                        }
+                    }
+
+                    count += 1;
+                }
+
+                if let Some(inner) = &mut self.inner_v4 {
+                    Self::poll_send_packets(inner, self.bind_v4, cx, &packets[0..count])
+                } else {
+                    Poll::Ready(Err(UdpRelayRemoteError::AddressNotSupported))
+                }
+            }
+            Host::Ip(IpAddr::V6(_)) => {
+                let mut count = 0;
+                for p in packets {
+                    let ups = p.upstream();
+                    let Host::Ip(IpAddr::V6(ip6)) = ups.host() else {
+                        break;
+                    };
+
+                    if let Err(e) =
+                        self.check_egress_ip(SocketAddr::new(IpAddr::V6(*ip6), ups.port()))
+                    {
+                        if count == 0 {
+                            return Poll::Ready(Err(e));
+                        } else {
+                            break;
+                        }
+                    }
+
+                    count += 1;
+                }
+
+                if let Some(inner) = &mut self.inner_v6 {
+                    Self::poll_send_packets(inner, self.bind_v6, cx, &packets[0..count])
+                } else {
+                    Poll::Ready(Err(UdpRelayRemoteError::AddressNotSupported))
+                }
+            }
+        }
     }
 }

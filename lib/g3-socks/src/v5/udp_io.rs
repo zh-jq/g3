@@ -14,13 +14,16 @@
  * limitations under the License.
  */
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use g3_types::net::{Host, UpstreamAddr};
 
 use bytes::{Buf, BufMut};
 
 use super::SocksUdpPacketError;
+
+pub(crate) const UDP_HEADER_LEN_IPV4: usize = 10;
+pub(crate) const UDP_HEADER_LEN_IPV6: usize = 22;
 
 pub struct UdpInput {}
 
@@ -41,8 +44,7 @@ impl UdpInput {
 
         let (off, addr) = match buf[3] {
             0x01 => {
-                const HEADER_LEN: usize = 10;
-                if len <= HEADER_LEN {
+                if len < UDP_HEADER_LEN_IPV4 {
                     return Err(SocksUdpPacketError::TooSmallPacket);
                 }
 
@@ -50,14 +52,14 @@ impl UdpInput {
                 let ip4 = Ipv4Addr::from(buf.get_u32());
                 let port = buf.get_u16();
                 (
-                    HEADER_LEN,
+                    UDP_HEADER_LEN_IPV4,
                     UpstreamAddr::from_ip_and_port(IpAddr::V4(ip4), port),
                 )
             }
             0x03 => {
                 let domain_len = buf[4] as usize;
                 let header_len = 4 + 1 + domain_len + 2;
-                if len <= header_len {
+                if len < header_len {
                     return Err(SocksUdpPacketError::TooSmallPacket);
                 }
 
@@ -70,8 +72,7 @@ impl UdpInput {
                 (header_len, addr)
             }
             0x04 => {
-                const HEADER_LEN: usize = 22;
-                if len <= HEADER_LEN {
+                if len < UDP_HEADER_LEN_IPV6 {
                     return Err(SocksUdpPacketError::TooSmallPacket);
                 }
 
@@ -79,7 +80,7 @@ impl UdpInput {
                 let ip6 = Ipv6Addr::from(buf.get_u128());
                 let port = buf.get_u16();
                 (
-                    HEADER_LEN,
+                    UDP_HEADER_LEN_IPV6,
                     UpstreamAddr::from_ip_and_port(IpAddr::V6(ip6), port),
                 )
             }
@@ -97,10 +98,10 @@ impl UdpOutput {
         match upstream.host() {
             Host::Ip(ip) => match ip {
                 IpAddr::V6(ip6) => match ip6.to_ipv4_mapped() {
-                    Some(_) => 10,
-                    None => 22,
+                    Some(_) => UDP_HEADER_LEN_IPV4,
+                    None => UDP_HEADER_LEN_IPV6,
                 },
-                IpAddr::V4(_) => 10,
+                IpAddr::V4(_) => UDP_HEADER_LEN_IPV4,
             },
             Host::Domain(domain) => {
                 let domain_len = domain.len().max(u8::MAX as usize) as u8;
@@ -114,25 +115,7 @@ impl UdpOutput {
         buf.put_u16(0x00);
         buf.put_u8(0x00);
         match upstream.host() {
-            Host::Ip(ip) => match ip {
-                IpAddr::V4(ip4) => {
-                    buf.put_u8(0x01);
-                    buf.put_slice(&ip4.octets());
-                    buf.put_u16(upstream.port());
-                }
-                IpAddr::V6(ip6) => match ip6.to_ipv4_mapped() {
-                    Some(ip4) => {
-                        buf.put_u8(0x01);
-                        buf.put_slice(&ip4.octets());
-                        buf.put_u16(upstream.port());
-                    }
-                    None => {
-                        buf.put_u8(0x04);
-                        buf.put_slice(&ip6.octets());
-                        buf.put_u16(upstream.port());
-                    }
-                },
-            },
+            Host::Ip(ip) => Self::put_addr(buf, *ip, upstream.port()),
             Host::Domain(domain) => {
                 buf.put_u8(0x03);
                 let domain_len = domain.len().max(u8::MAX as usize) as u8;
@@ -140,6 +123,58 @@ impl UdpOutput {
                 buf.put_slice(&domain.as_bytes()[0..domain_len as usize]);
                 buf.put_u16(upstream.port());
             }
+        }
+    }
+
+    pub fn generate_header2(mut buf: &mut [u8], addr: SocketAddr) {
+        buf.put_u16(0x00);
+        buf.put_u8(0x00);
+        Self::put_addr(buf, addr.ip(), addr.port());
+    }
+
+    fn put_addr(mut buf: &mut [u8], ip: IpAddr, port: u16) {
+        match ip {
+            IpAddr::V4(ip4) => {
+                buf.put_u8(0x01);
+                buf.put_slice(&ip4.octets());
+                buf.put_u16(port);
+            }
+            IpAddr::V6(ip6) => match ip6.to_ipv4_mapped() {
+                Some(ip4) => {
+                    buf.put_u8(0x01);
+                    buf.put_slice(&ip4.octets());
+                    buf.put_u16(port);
+                }
+                None => {
+                    buf.put_u8(0x04);
+                    buf.put_slice(&ip6.octets());
+                    buf.put_u16(port);
+                }
+            },
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SocksUdpHeader {
+    buf: Vec<u8>,
+}
+
+impl SocksUdpHeader {
+    pub fn encode(&mut self, ups: &UpstreamAddr) -> &[u8] {
+        let header_len = UdpOutput::calc_header_len(ups);
+        if header_len > self.buf.len() {
+            self.buf.resize(header_len, 0);
+        }
+        UdpOutput::generate_header(&mut self.buf, ups);
+        &self.buf[0..header_len]
+    }
+}
+
+impl Default for SocksUdpHeader {
+    fn default() -> Self {
+        SocksUdpHeader {
+            buf: vec![0; 22], // large enough for ipv6
         }
     }
 }

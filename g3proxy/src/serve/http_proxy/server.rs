@@ -22,8 +22,10 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use log::debug;
 use slog::Logger;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
+use tokio_openssl::SslStream;
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
 use g3_daemon::listen::ListenStats;
@@ -31,7 +33,7 @@ use g3_daemon::server::ClientConnectionInfo;
 use g3_types::acl::{AclAction, AclNetworkRule};
 use g3_types::acl_set::AclDstHostRuleSet;
 use g3_types::metrics::MetricsName;
-use g3_types::net::OpensslTlsClientConfig;
+use g3_types::net::OpensslClientConfig;
 
 use super::task::{
     CommonTaskContext, HttpProxyPipelineReaderTask, HttpProxyPipelineStats,
@@ -53,7 +55,7 @@ pub(crate) struct HttpProxyServer {
     listen_stats: Arc<ListenStats>,
     tls_acceptor: Option<TlsAcceptor>,
     tls_accept_timeout: Duration,
-    tls_client_config: Arc<OpensslTlsClientConfig>,
+    tls_client_config: Arc<OpensslClientConfig>,
     ingress_net_filter: Option<Arc<AclNetworkRule>>,
     dst_host_filter: Option<Arc<AclDstHostRuleSet>>,
     reload_sender: broadcast::Sender<ServerReloadCommand>,
@@ -190,12 +192,14 @@ impl HttpProxyServer {
         false
     }
 
-    async fn spawn_tls_task(
+    async fn spawn_stream_task<T>(
         &self,
-        stream: TlsStream<TcpStream>,
+        stream: T,
         cc_info: ClientConnectionInfo,
         run_ctx: ServerRunContext,
-    ) {
+    ) where
+        T: AsyncRead + AsyncWrite + Send + Sync + 'static,
+    {
         let ctx = self.get_common_task_context(
             cc_info,
             run_ctx.escaper,
@@ -369,7 +373,7 @@ impl Server for HttpProxyServer {
 
         if let Some(tls_acceptor) = &self.tls_acceptor {
             match tokio::time::timeout(self.tls_accept_timeout, tls_acceptor.accept(stream)).await {
-                Ok(Ok(tls_stream)) => self.spawn_tls_task(tls_stream, cc_info, ctx).await,
+                Ok(Ok(tls_stream)) => self.spawn_stream_task(tls_stream, cc_info, ctx).await,
                 Ok(Err(e)) => {
                     self.listen_stats.add_failed();
                     debug!(
@@ -394,18 +398,33 @@ impl Server for HttpProxyServer {
         }
     }
 
-    async fn run_tls_task(
+    async fn run_rustls_task(
         &self,
         stream: TlsStream<TcpStream>,
         cc_info: ClientConnectionInfo,
         ctx: ServerRunContext,
     ) {
-        let peer_addr = cc_info.sock_peer_addr();
-        self.server_stats.add_conn(peer_addr);
-        if self.drop_early(peer_addr) {
+        let client_addr = cc_info.client_addr();
+        self.server_stats.add_conn(client_addr);
+        if self.drop_early(client_addr) {
             return;
         }
 
-        self.spawn_tls_task(stream, cc_info, ctx).await;
+        self.spawn_stream_task(stream, cc_info, ctx).await;
+    }
+
+    async fn run_openssl_task(
+        &self,
+        stream: SslStream<TcpStream>,
+        cc_info: ClientConnectionInfo,
+        ctx: ServerRunContext,
+    ) {
+        let client_addr = cc_info.client_addr();
+        self.server_stats.add_conn(client_addr);
+        if self.drop_early(client_addr) {
+            return;
+        }
+
+        self.spawn_stream_task(stream, cc_info, ctx).await;
     }
 }

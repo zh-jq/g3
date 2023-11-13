@@ -14,52 +14,55 @@
  * limitations under the License.
  */
 
-use std::io;
+use std::io::{self, IoSlice};
 use std::task::{ready, Context, Poll};
 
-use bytes::BufMut;
-
 use g3_io_ext::{AsyncUdpSend, UdpCopyRemoteError, UdpCopyRemoteSend};
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use g3_io_ext::{SendMsgHdr, UdpCopyPacket};
 use g3_socks::v5::UdpOutput;
 use g3_types::net::UpstreamAddr;
 
 pub(crate) struct ProxySocks5UdpConnectRemoteSend<T> {
-    upstream: UpstreamAddr,
     inner: T,
+    socks5_header: Vec<u8>,
 }
 
 impl<T> ProxySocks5UdpConnectRemoteSend<T>
 where
     T: AsyncUdpSend,
 {
-    pub(crate) fn new(send: T, upstream: UpstreamAddr) -> Self {
+    pub(crate) fn new(send: T, upstream: &UpstreamAddr) -> Self {
+        let header_len = UdpOutput::calc_header_len(upstream);
+        let mut socks5_header = vec![0; header_len];
+        UdpOutput::generate_header(&mut socks5_header, upstream);
         ProxySocks5UdpConnectRemoteSend {
-            upstream,
             inner: send,
+            socks5_header,
         }
     }
+}
 
+impl<T> UdpCopyRemoteSend for ProxySocks5UdpConnectRemoteSend<T>
+where
+    T: AsyncUdpSend + Send,
+{
     fn poll_send_packet(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-        buf_off: usize,
-        buf_len: usize,
+        buf: &[u8],
     ) -> Poll<Result<usize, UdpCopyRemoteError>> {
-        let header_len = UdpOutput::calc_header_len(&self.upstream);
-        let nw = if header_len <= buf_off {
-            UdpOutput::generate_header(&mut buf[buf_off - header_len..buf_off], &self.upstream);
-            ready!(self
-                .inner
-                .poll_send(cx, &buf[buf_off - header_len..buf_len]))
-            .map_err(UdpCopyRemoteError::SendFailed)?
-        } else {
-            let mut new_buf: Vec<u8> = Vec::with_capacity(buf_len - buf_off + header_len);
-            UdpOutput::generate_header(&mut new_buf[0..header_len], &self.upstream);
-            unsafe { new_buf.set_len(header_len) };
-            new_buf.put_slice(&buf[buf_off..buf_len]);
-            ready!(self.inner.poll_send(cx, &new_buf)).map_err(UdpCopyRemoteError::SendFailed)?
-        };
+        let nw = ready!(self.inner.poll_sendmsg(
+            cx,
+            &[IoSlice::new(&self.socks5_header), IoSlice::new(buf)],
+            None
+        ))
+        .map_err(UdpCopyRemoteError::SendFailed)?;
         if nw == 0 {
             Poll::Ready(Err(UdpCopyRemoteError::SendFailed(io::Error::new(
                 io::ErrorKind::WriteZero,
@@ -69,23 +72,34 @@ where
             Poll::Ready(Ok(nw))
         }
     }
-}
 
-impl<T> UdpCopyRemoteSend for ProxySocks5UdpConnectRemoteSend<T>
-where
-    T: AsyncUdpSend + Send,
-{
-    fn buf_reserve_length(&self) -> usize {
-        256 + 4 + 2
-    }
-
-    fn poll_send_packet(
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_send_packets(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-        buf_off: usize,
-        buf_len: usize,
+        packets: &[UdpCopyPacket],
     ) -> Poll<Result<usize, UdpCopyRemoteError>> {
-        self.poll_send_packet(cx, buf, buf_off, buf_len)
+        let msgs: Vec<SendMsgHdr<2>> = packets
+            .iter()
+            .map(|p| SendMsgHdr {
+                iov: [IoSlice::new(&self.socks5_header), IoSlice::new(p.payload())],
+                addr: None,
+            })
+            .collect();
+        let count = ready!(self.inner.poll_batch_sendmsg(cx, &msgs))
+            .map_err(UdpCopyRemoteError::SendFailed)?;
+        if count == 0 {
+            Poll::Ready(Err(UdpCopyRemoteError::SendFailed(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "write zero packet into sender",
+            ))))
+        } else {
+            Poll::Ready(Ok(count))
+        }
     }
 }

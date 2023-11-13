@@ -16,7 +16,14 @@
 
 use std::error::Error;
 use std::fmt;
-use std::io;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use std::io::IoSliceMut;
+use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
@@ -24,7 +31,14 @@ use std::task::{ready, Context, Poll};
 use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
 
-use super::{AsyncUdpRecv, AsyncUdpSend};
+use super::{AsyncUdpRecv, AsyncUdpSend, UdpSocketExt};
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use super::{RecvMsgBuf, RecvMsgHdr, SendMsgHdr};
 
 #[derive(Debug)]
 pub struct SendHalf(Arc<UdpSocket>);
@@ -85,6 +99,29 @@ impl AsyncUdpSend for SendHalf {
     fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         self.0.poll_send(cx, buf)
     }
+
+    fn poll_sendmsg(
+        &mut self,
+        cx: &mut Context<'_>,
+        iov: &[IoSlice<'_>],
+        target: Option<SocketAddr>,
+    ) -> Poll<io::Result<usize>> {
+        self.0.poll_sendmsg(cx, iov, target)
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_batch_sendmsg<const C: usize>(
+        &mut self,
+        cx: &mut Context<'_>,
+        msgs: &[SendMsgHdr<'_, C>],
+    ) -> Poll<io::Result<usize>> {
+        self.0.poll_batch_sendmsg(cx, msgs)
+    }
 }
 
 impl RecvHalf {
@@ -102,19 +139,34 @@ impl AsyncUdpRecv for RecvHalf {
         &mut self,
         cx: &mut Context<'_>,
         buf: &mut [u8],
-    ) -> Poll<Result<(usize, SocketAddr), io::Error>> {
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
         let mut buf = ReadBuf::new(buf);
         let addr = ready!(self.0.poll_recv_from(cx, &mut buf))?;
         Poll::Ready(Ok((buf.filled().len(), addr)))
     }
 
-    fn poll_recv(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<Result<usize, io::Error>> {
+    fn poll_recv(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
         let mut buf = ReadBuf::new(buf);
         ready!(self.0.poll_recv(cx, &mut buf))?;
         Poll::Ready(Ok(buf.filled().len()))
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_batch_recvmsg(
+        &mut self,
+        cx: &mut Context<'_>,
+        bufs: &mut [RecvMsgBuf<'_>],
+        meta: &mut [RecvMsgHdr],
+    ) -> Poll<io::Result<usize>> {
+        let slices: Vec<[IoSliceMut<'_>; 1]> = bufs
+            .iter_mut()
+            .map(|v| [IoSliceMut::new(v.as_mut())])
+            .collect();
+        self.0.poll_batch_recvmsg(cx, &slices, meta)
     }
 }

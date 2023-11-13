@@ -28,6 +28,7 @@
     + [多协议入口复用](#多协议入口复用)
     + [监听多个端口](#监听多个端口)
     + [监听端口启用PROXY Protocol](#监听端口启用proxy-protocol)
+    + [国密TLCP协议封装](#国密tlcp协议封装)
     + [Socks5 UDP IP映射](#socks5-udp-ip映射)
     + [安全反向代理](#安全反向代理)
     + [域名解析劫持](#域名解析劫持)
@@ -176,7 +177,7 @@ server:
 
 ### TLS卸载
 
-本地TCP端口映射到目标机器的TLS端口，需要添加TcpStream类型入口，示例如下：
+本地TCP端口映射到目标机器的TLS端口。需要添加TcpStream类型入口，示例如下：
 
 ```yaml
 server:
@@ -190,7 +191,9 @@ server:
 
 ### TLS封装
 
-本地TLS端口映射到目标机器的特定端口，需要添加TlsStream类型入口，示例如下：
+本地TLS端口映射到目标机器的特定端口。
+
+可添加TlsStream类型入口，示例如下：
 
 ```yaml
 server:
@@ -203,11 +206,34 @@ server:
       cert_pairs:
         certificate: /path/to/cert
         private_key: /path/to/key
-      enable_client_auth: true    # 启用mTLS
+      enable_client_auth: true    # 可选启用mTLS
     proxy_pass:         # 目标地址，可以单条/多条
       - "127.0.0.1:5201"
       - "127.0.0.1:5202"
     upstream_pick_policy: rr # 负载均衡算法，默认random
+```
+
+或使用PlainTlsPort串联TcpStream，示例如下：
+
+```yaml
+server:
+  - name: tcp
+    escaper: default
+    type: tcp_stream
+    proxy_pass:         # 目标地址，可以单条/多条
+      - "127.0.0.1:5201"
+      - "127.0.0.1:5202"
+    upstream_pick_policy: rr # 负载均衡算法，默认random
+  - name: tls
+    type: plain_tls_port
+    listen:
+      address: "[::1]:10443"
+    tls_server:                   # 配置TLS参数
+      cert_pairs:
+        certificate: /path/to/cert
+        private_key: /path/to/key
+      enable_client_auth: true    # 可选启用mTLS
+    server: tcp    # 指向tcp stream服务
 ```
 
 ### SNI代理
@@ -272,12 +298,12 @@ udp_sock_speed_limit: 10M/s
 
 ### 安全解析
 
-需要使用非明文的方式访问DNS递归解析服务器时，需要使用trust-dns解析，示例如下：
+需要使用非明文的方式访问DNS递归解析服务器时，需要使用hickory解析，示例如下：
 
 ```yaml
 resolver:
   - name: default
-    type: trust-dns
+    type: hickory
     server: 1.1.1.1
     encryption: dns-over-https # 此外也支持 dns-over-tls、dns-over-quic
 ```
@@ -486,7 +512,7 @@ server:
       cert_pairs:
         certificate: /path/to/certificate
         private_key: /path/to/private_key
-      enable_client_auth: true            # 开启mTLS
+      enable_client_auth: true            # 可选开启mTLS
 ```
 
 Port类型入口仅有独立的Listen监控，流量监控、日志都是在下一跳Server处理的，在规划时需要考虑清楚是串联Port还是拆分Server更合适。
@@ -499,15 +525,42 @@ Port类型入口仅有独立的Listen监控，流量监控、日志都是在下�
 ```yaml
 server:
   - name: real_http
-    listen: "[127.0.0.1]:1234"
+    listen: "[127.0.0.1]:1234" # 可省略
     type: http_proxy
-    ingress_network_filter: {} # 配置针对解析后地址的过滤规则
+    ingress_network_filter: {} # 配置针对PROXY Protocol提取来源地址的过滤规则
     # ... 其他配置
   - name: pp_for_http
-    type: plain_tls_port
+    type: plain_tcp_port
+    listen: "[::]:8080"
     server: real_http
     proxy_protocol: v2
-    ingress_network_filter: {} # 配置针对上一级代理的过滤规则
+    ingress_network_filter: {} # 配置针对套接字原始来源地址的过滤规则
+```
+
+### 国密TLCP协议封装
+
+此功能需要编译时启用feature vendored-tongsuo。
+
+可使用NativeTlsPort实现国密TLCP协议封装：
+
+```yaml
+server:
+  - name: real_http
+    listen: "[127.0.0.1]:1234" # 可省略
+    type: http_proxy
+    # ... 其他配置
+  - name: tlcp
+    type: native_tls_port
+    listen: "[::]:443"
+    tls_server:
+      tlcp_cert_pairs:         # 启用国密TLCP协议
+        sign_certificate: /path/to/sign.crt
+        sign_private_key: /path/to/sign.key
+        enc_certificate: /path/to/enc.crt
+        enc_private_key: /path/to/enc.key
+      enable_client_auth: true # 可选启用mTLS
+    server: real_http
+    proxy_protocol: v2         # 可选启用PROXY Protocol
 ```
 
 ### Socks5 UDP IP映射

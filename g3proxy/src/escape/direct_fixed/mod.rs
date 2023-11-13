@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use rand::seq::SliceRandom;
 use slog::Logger;
 
 use g3_daemon::stat::remote::ArcTcpConnectionTaskRemoteStats;
@@ -28,7 +27,7 @@ use g3_resolver::ResolveError;
 use g3_socket::util::AddressFamily;
 use g3_types::acl::AclNetworkRule;
 use g3_types::metrics::MetricsName;
-use g3_types::net::{Host, OpensslTlsClientConfig, UpstreamAddr};
+use g3_types::net::{Host, OpensslClientConfig, UpstreamAddr};
 use g3_types::resolve::{ResolveRedirection, ResolveStrategy};
 use g3_types::route::EgressPathSelection;
 
@@ -142,7 +141,7 @@ impl DirectFixedEscaper {
                     }
                 }
 
-                vec.choose(&mut rand::thread_rng()).copied()
+                fastrand::choice(vec).copied()
             }
         }
     }
@@ -293,7 +292,7 @@ impl Escaper for DirectFixedEscaper {
         tcp_notes: &'a mut TcpConnectTaskNotes,
         task_notes: &'a ServerTaskNotes,
         task_stats: ArcTcpConnectionTaskRemoteStats,
-        tls_config: &'a OpensslTlsClientConfig,
+        tls_config: &'a OpensslClientConfig,
         tls_name: &'a str,
     ) -> TcpConnectResult {
         self.stats.interface.add_tls_connect_attempted();
@@ -393,7 +392,7 @@ impl EscaperInternal for DirectFixedEscaper {
         tcp_notes: &'a mut TcpConnectTaskNotes,
         task_notes: &'a ServerTaskNotes,
         task_stats: ArcHttpForwardTaskRemoteStats,
-        tls_config: &'a OpensslTlsClientConfig,
+        tls_config: &'a OpensslClientConfig,
         tls_name: &'a str,
     ) -> Result<BoxHttpForwardConnection, TcpConnectError> {
         self.stats

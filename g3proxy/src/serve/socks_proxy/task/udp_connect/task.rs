@@ -316,10 +316,10 @@ impl SocksProxyUdpConnectTask {
     async fn run_relay<'a, R>(
         &'a mut self,
         mut clt_tcp_r: R,
-        clt_r: Box<dyn UdpCopyClientRecv + Unpin + Send>,
-        clt_w: Box<dyn UdpCopyClientSend + Unpin + Send>,
-        ups_r: Box<dyn UdpCopyRemoteRecv + Unpin + Send>,
-        ups_w: Box<dyn UdpCopyRemoteSend + Unpin + Send>,
+        mut clt_r: Box<dyn UdpCopyClientRecv + Unpin + Send>,
+        mut clt_w: Box<dyn UdpCopyClientSend + Unpin + Send>,
+        mut ups_r: Box<dyn UdpCopyRemoteRecv + Unpin + Send>,
+        mut ups_w: Box<dyn UdpCopyRemoteSend + Unpin + Send>,
         escape_logger: &'a Logger,
     ) -> ServerTaskResult<()>
     where
@@ -327,8 +327,10 @@ impl SocksProxyUdpConnectTask {
     {
         let task_id = &self.task_notes.id;
 
-        let mut c_to_r = UdpCopyClientToRemote::new(clt_r, ups_w, self.ctx.server_config.udp_relay);
-        let mut r_to_c = UdpCopyRemoteToClient::new(clt_w, ups_r, self.ctx.server_config.udp_relay);
+        let mut c_to_r =
+            UdpCopyClientToRemote::new(&mut *clt_r, &mut *ups_w, self.ctx.server_config.udp_relay);
+        let mut r_to_c =
+            UdpCopyRemoteToClient::new(&mut *clt_w, &mut *ups_r, self.ctx.server_config.udp_relay);
 
         let idle_duration = self.ctx.server_config.task_idle_check_duration;
         let mut idle_interval =
@@ -454,10 +456,10 @@ impl SocksProxyUdpConnectTask {
         let mut clt_r = Socks5UdpConnectClientRecv::new(clt_r, self.udp_client_addr);
 
         let buf_len = self.ctx.server_config.udp_relay.packet_size();
-        let mut buf = vec![0u8; buf_len].into_boxed_slice();
+        let mut buf = vec![0u8; buf_len];
 
         let (buf_off, buf_nr, udp_client_addr, upstream) = self
-            .recv_first_packet(clt_tcp_r, &mut clt_r, buf.as_mut())
+            .recv_first_packet(clt_tcp_r, &mut clt_r, &mut buf)
             .await?;
         self.udp_notes.upstream = Some(upstream.clone());
         self.udp_client_addr = Some(udp_client_addr);
@@ -530,7 +532,7 @@ impl SocksProxyUdpConnectTask {
             .await?;
         self.task_notes.stage = ServerTaskStage::Connected;
 
-        poll_fn(|cx| ups_w.poll_send_packet(cx, buf.as_mut(), buf_off, buf_nr)).await?;
+        poll_fn(|cx| ups_w.poll_send_packet(cx, &buf[buf_off..buf_nr])).await?;
 
         let clt_w = Socks5UdpConnectClientSend::new(clt_w, upstream);
 

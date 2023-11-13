@@ -14,11 +14,13 @@
  * limitations under the License.
  */
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicI32, AtomicIsize, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 
+use g3_histogram::{DurationHistogram, HistogramRecorder, HistogramStats, Quantile};
 use g3_types::metrics::{MetricsName, StaticMetricsTags};
 use g3_types::stats::StatId;
 
@@ -212,4 +214,114 @@ impl KeyServerStats {
     pub(crate) fn get_alive_count(&self) -> i32 {
         self.task_alive_count.load(Ordering::Relaxed)
     }
+}
+
+pub(crate) struct KeyServerDurationStats {
+    name: MetricsName,
+    id: StatId,
+
+    extra_metrics_tags: Arc<ArcSwapOption<StaticMetricsTags>>,
+
+    online: AtomicIsize,
+
+    pub(crate) ping_pong: Arc<HistogramStats>,
+    pub(crate) rsa_decrypt: Arc<HistogramStats>,
+    pub(crate) rsa_sign: Arc<HistogramStats>,
+    pub(crate) rsa_pss_sign: Arc<HistogramStats>,
+    pub(crate) ecdsa_sign: Arc<HistogramStats>,
+    pub(crate) ed25519_sign: Arc<HistogramStats>,
+}
+
+impl KeyServerDurationStats {
+    #[inline]
+    pub(crate) fn name(&self) -> &MetricsName {
+        &self.name
+    }
+
+    #[inline]
+    pub(crate) fn stat_id(&self) -> StatId {
+        self.id
+    }
+
+    pub(crate) fn set_extra_tags(&self, tags: Option<Arc<StaticMetricsTags>>) {
+        self.extra_metrics_tags.store(tags);
+    }
+
+    pub(crate) fn extra_tags(&self) -> &Arc<ArcSwapOption<StaticMetricsTags>> {
+        &self.extra_metrics_tags
+    }
+
+    pub(crate) fn set_online(&self) {
+        self.online.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_offline(&self) {
+        self.online.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn is_online(&self) -> bool {
+        self.online.load(Ordering::Relaxed) > 0
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct KeyServerDurationRecorder {
+    pub(crate) ping_pong: Arc<HistogramRecorder<u64>>,
+    pub(crate) rsa_decrypt: Arc<HistogramRecorder<u64>>,
+    pub(crate) rsa_sign: Arc<HistogramRecorder<u64>>,
+    pub(crate) rsa_pss_sign: Arc<HistogramRecorder<u64>>,
+    pub(crate) ecdsa_sign: Arc<HistogramRecorder<u64>>,
+    pub(crate) ed25519_sign: Arc<HistogramRecorder<u64>>,
+    pub(crate) noop: Arc<HistogramRecorder<u64>>,
+}
+
+impl KeyServerDurationRecorder {
+    pub(crate) fn new(
+        name: &MetricsName,
+        quantile: &BTreeSet<Quantile>,
+    ) -> (KeyServerDurationRecorder, KeyServerDurationStats) {
+        let (ping_pong_r, ping_pong_s) = create_duration_pair(quantile);
+        let (rsa_decrypt_r, rsa_decrypt_s) = create_duration_pair(quantile);
+        let (rsa_sign_r, rsa_sign_s) = create_duration_pair(quantile);
+        let (rsa_pss_sign_r, rsa_pss_sign_s) = create_duration_pair(quantile);
+        let (ecdsa_sign_r, ecdsa_sign_s) = create_duration_pair(quantile);
+        let (ed25519_sign_r, ed25519_sign_s) = create_duration_pair(quantile);
+        let (_, noop_r) = DurationHistogram::new();
+
+        let r = KeyServerDurationRecorder {
+            ping_pong: ping_pong_r,
+            rsa_decrypt: rsa_decrypt_r,
+            rsa_sign: rsa_sign_r,
+            rsa_pss_sign: rsa_pss_sign_r,
+            ecdsa_sign: ecdsa_sign_r,
+            ed25519_sign: ed25519_sign_r,
+            noop: Arc::new(noop_r),
+        };
+        let s = KeyServerDurationStats {
+            name: name.clone(),
+            id: StatId::new(),
+            extra_metrics_tags: Arc::new(ArcSwapOption::new(None)),
+            online: AtomicIsize::new(0),
+            ping_pong: ping_pong_s,
+            rsa_decrypt: rsa_decrypt_s,
+            rsa_sign: rsa_sign_s,
+            rsa_pss_sign: rsa_pss_sign_s,
+            ecdsa_sign: ecdsa_sign_s,
+            ed25519_sign: ed25519_sign_s,
+        };
+        (r, s)
+    }
+}
+
+fn create_duration_pair(
+    quantile: &BTreeSet<Quantile>,
+) -> (Arc<HistogramRecorder<u64>>, Arc<HistogramStats>) {
+    let (h, r) = DurationHistogram::new();
+    let stats = if quantile.is_empty() {
+        Arc::new(HistogramStats::default())
+    } else {
+        Arc::new(HistogramStats::with_quantiles(quantile))
+    };
+    h.spawn_refresh(stats.clone());
+    (Arc::new(r), stats)
 }

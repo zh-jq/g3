@@ -30,7 +30,7 @@ use g3_runtime::unaided::UnaidedRuntimeConfig;
 use g3_statsd::client::{StatsdBackend, StatsdClientConfig};
 use g3_types::collection::{SelectivePickPolicy, SelectiveVec, SelectiveVecBuilder, WeightedValue};
 use g3_types::metrics::MetricsName;
-use g3_types::net::{TcpSockSpeedLimitConfig, UpstreamAddr};
+use g3_types::net::{TcpSockSpeedLimitConfig, UdpSockSpeedLimitConfig, UpstreamAddr};
 
 use super::progress::BenchProgress;
 
@@ -45,6 +45,7 @@ const GLOBAL_ARG_TIME_LIMIT: &str = "time-limit";
 const GLOBAL_ARG_REQUESTS: &str = "requests";
 const GLOBAL_ARG_RESOLVE: &str = "resolve";
 const GLOBAL_ARG_LOG_ERROR: &str = "log-error";
+const GLOBAL_ARG_IGNORE_FATAL_ERROR: &str = "ignore-fatal-error";
 const GLOBAL_ARG_EMIT_METRICS: &str = "emit-metrics";
 const GLOBAL_ARG_STATSD_TARGET_UDP: &str = "statsd-target-udp";
 const GLOBAL_ARG_STATSD_TARGET_UNIX: &str = "statsd-target-unix";
@@ -53,8 +54,9 @@ const GLOBAL_ARG_NO_PROGRESS_BAR: &str = "no-progress-bar";
 const GLOBAL_ARG_PEER_PICK_POLICY: &str = "peer-pick-policy";
 const GLOBAL_ARG_TCP_LIMIT_SHIFT: &str = "tcp-limit-shift";
 const GLOBAL_ARG_TCP_LIMIT_BYTES: &str = "tcp-limit-bytes";
-
-const DEFAULT_STAT_PREFIX: &str = "g3bench";
+const GLOBAL_ARG_UDP_LIMIT_SHIFT: &str = "udp-limit-shift";
+const GLOBAL_ARG_UDP_LIMIT_BYTES: &str = "udp-limit-bytes";
+const GLOBAL_ARG_UDP_LIMIT_PACKETS: &str = "udp-limit-packets";
 
 pub struct ProcArgs {
     pub(super) concurrency: usize,
@@ -62,6 +64,7 @@ pub struct ProcArgs {
     pub(super) requests: Option<usize>,
     pub(super) time_limit: Option<Duration>,
     pub(super) log_error_count: usize,
+    pub(super) ignore_fatal_error: bool,
     pub(super) task_unconstrained: bool,
     resolver: AHashMap<UpstreamAddr, IpAddr>,
     pub(super) use_unaided_worker: bool,
@@ -74,6 +77,7 @@ pub struct ProcArgs {
 
     peer_pick_policy: SelectivePickPolicy,
     pub(super) tcp_sock_speed_limit: TcpSockSpeedLimitConfig,
+    pub(super) udp_sock_speed_limit: UdpSockSpeedLimitConfig,
 }
 
 impl Default for ProcArgs {
@@ -84,6 +88,7 @@ impl Default for ProcArgs {
             requests: None,
             time_limit: None,
             log_error_count: 0,
+            ignore_fatal_error: false,
             task_unconstrained: false,
             resolver: AHashMap::new(),
             use_unaided_worker: false,
@@ -94,6 +99,7 @@ impl Default for ProcArgs {
             no_progress_bar: false,
             peer_pick_policy: SelectivePickPolicy::RoundRobin,
             tcp_sock_speed_limit: TcpSockSpeedLimitConfig::default(),
+            udp_sock_speed_limit: UdpSockSpeedLimitConfig::default(),
         }
     }
 }
@@ -323,6 +329,13 @@ pub fn add_global_args(app: Command) -> Command {
             .value_parser(value_parser!(usize)),
     )
     .arg(
+        Arg::new(GLOBAL_ARG_IGNORE_FATAL_ERROR)
+            .help("Continue even if fatal error occurred")
+            .long(GLOBAL_ARG_IGNORE_FATAL_ERROR)
+            .global(true)
+            .action(ArgAction::SetTrue),
+    )
+    .arg(
         Arg::new(GLOBAL_ARG_EMIT_METRICS)
             .help("Set if we need to emit metrics to statsd")
             .action(ArgAction::SetTrue)
@@ -366,7 +379,7 @@ pub fn add_global_args(app: Command) -> Command {
     )
     .arg(
         Arg::new(GLOBAL_ARG_TCP_LIMIT_SHIFT)
-            .help("Shift value for the TCP per connection rate limit config")
+            .help("Shift value for the TCP socket speed limit config")
             .value_name("SHIFT VALUE")
             .long(GLOBAL_ARG_TCP_LIMIT_SHIFT)
             .global(true)
@@ -377,9 +390,37 @@ pub fn add_global_args(app: Command) -> Command {
     )
     .arg(
         Arg::new(GLOBAL_ARG_TCP_LIMIT_BYTES)
-            .help("Bytes value for the TCP per connect rate limit config")
+            .help("Bytes value for the TCP socket speed limit config")
             .value_name("BYTES COUNT")
             .long(GLOBAL_ARG_TCP_LIMIT_BYTES)
+            .global(true)
+            .num_args(1)
+            .value_parser(value_parser!(usize)),
+    )
+    .arg(
+        Arg::new(GLOBAL_ARG_UDP_LIMIT_SHIFT)
+            .help("Shift value for the UDP socket speed limit config")
+            .value_name("SHIFT VALUE")
+            .long(GLOBAL_ARG_UDP_LIMIT_SHIFT)
+            .global(true)
+            .num_args(1)
+            .value_parser(["2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"])
+            .default_value("10"),
+    )
+    .arg(
+        Arg::new(GLOBAL_ARG_UDP_LIMIT_BYTES)
+            .help("Bytes value for the UDP socket speed limit config")
+            .value_name("BYTES COUNT")
+            .long(GLOBAL_ARG_UDP_LIMIT_BYTES)
+            .global(true)
+            .num_args(1)
+            .value_parser(value_parser!(usize)),
+    )
+    .arg(
+        Arg::new(GLOBAL_ARG_UDP_LIMIT_PACKETS)
+            .help("Packet value for the UDP socket speed limit config")
+            .value_name("PACKETS COUNT")
+            .long(GLOBAL_ARG_UDP_LIMIT_PACKETS)
             .global(true)
             .num_args(1)
             .value_parser(value_parser!(usize)),
@@ -435,10 +476,13 @@ pub fn parse_global_args(args: &ArgMatches) -> anyhow::Result<ProcArgs> {
     if let Some(n) = args.get_one::<usize>(GLOBAL_ARG_LOG_ERROR) {
         proc_args.log_error_count = *n;
     }
+    if args.get_flag(GLOBAL_ARG_IGNORE_FATAL_ERROR) {
+        proc_args.ignore_fatal_error = true;
+    }
 
     if args.get_flag(GLOBAL_ARG_EMIT_METRICS) {
         let mut config =
-            StatsdClientConfig::with_prefix(MetricsName::from_str(DEFAULT_STAT_PREFIX).unwrap());
+            StatsdClientConfig::with_prefix(MetricsName::from_str(crate::build::PKG_NAME).unwrap());
 
         if let Some(addr) = args.get_one::<SocketAddr>(GLOBAL_ARG_STATSD_TARGET_UDP) {
             config.set_backend(StatsdBackend::Udp(*addr, None));
@@ -464,6 +508,23 @@ pub fn parse_global_args(args: &ArgMatches) -> anyhow::Result<ProcArgs> {
         proc_args.tcp_sock_speed_limit.shift_millis = shift;
         proc_args.tcp_sock_speed_limit.max_north = *bytes;
         proc_args.tcp_sock_speed_limit.max_south = *bytes;
+    }
+
+    let mut set_udp_limit = false;
+    if let Some(bytes) = args.get_one::<usize>(GLOBAL_ARG_UDP_LIMIT_BYTES) {
+        proc_args.udp_sock_speed_limit.max_north_bytes = *bytes;
+        proc_args.udp_sock_speed_limit.max_south_bytes = *bytes;
+        set_udp_limit = true;
+    }
+    if let Some(packets) = args.get_one::<usize>(GLOBAL_ARG_UDP_LIMIT_PACKETS) {
+        proc_args.udp_sock_speed_limit.max_north_packets = *packets;
+        proc_args.udp_sock_speed_limit.max_south_packets = *packets;
+        set_udp_limit = true;
+    }
+    if set_udp_limit {
+        let shift = args.get_one::<String>(GLOBAL_ARG_UDP_LIMIT_SHIFT).unwrap();
+        let shift = u8::from_str(shift).unwrap();
+        proc_args.tcp_sock_speed_limit.shift_millis = shift;
     }
 
     if proc_args.time_limit.is_none() && proc_args.requests.is_none() {

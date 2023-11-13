@@ -167,7 +167,6 @@ impl OpensslHostConfig {
         ssl_builder.set_cipher_list(
             "ECDHE-SM2-WITH-SM4-SM3:ECC-SM2-WITH-SM4-SM3:\
              ECDHE-SM2-SM4-CBC-SM3:ECDHE-SM2-SM4-GCM-SM3:ECC-SM2-SM4-CBC-SM3:ECC-SM2-SM4-GCM-SM3:\
-             IBSDH-SM9-SM4-CBC-SM3:IBSDH-SM9-SM4-GCM-SM3:IBC-SM9-SM4-CBC-SM3:IBC-SM9-SM4-GCM-SM3:\
              RSA-SM4-CBC-SM3:RSA-SM4-GCM-SM3:RSA-SM4-CBC-SHA256:RSA-SM4-GCM-SHA256",
         )?;
 
@@ -286,8 +285,7 @@ impl YamlMapCallback for OpensslHostConfig {
                 let lookup_dir = g3_daemon::config::get_lookup_dir(doc)?;
                 let certs = g3_yaml::value::as_openssl_certificates(value, Some(lookup_dir))
                     .context(format!("invalid certificate(s) value for key {key}"))?;
-                self.set_client_auth_certificates(certs)?;
-                Ok(())
+                self.set_client_auth_certificates(certs)
             }
             "request_rate_limit" | "request_limit_quota" => {
                 let quota = g3_yaml::value::as_rate_limit_quota(value)

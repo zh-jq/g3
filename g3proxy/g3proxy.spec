@@ -13,7 +13,7 @@
 %define build_profile release-lto
 
 Name:           g3proxy
-Version:        1.7.25.tlcp2
+Version:        1.7.29
 Release:        1%{?dist}
 Summary:        Generic proxy for G3 Project
 
@@ -23,6 +23,7 @@ Source0:        %{name}-%{version}.tar.xz
 
 BuildRequires:  gcc, make, %{pkgconfig_real}, %{cmake_real}, capnproto
 BuildRequires:  lua-devel, openssl-devel
+BuildRequires:  perl-IPC-Cmd
 Requires:       systemd
 Requires:       ca-certificates
 
@@ -42,7 +43,7 @@ LUA_FEATURE=lua$LUA_VERSION
 SSL_FEATURE=$(sh scripts/package/detect_openssl_feature.sh)
 CARES_FEATURE=$(sh scripts/package/detect_c-ares_feature.sh)
 export CMAKE="%{cmake_real}"
-cargo build --frozen --offline --profile %{build_profile} --no-default-features --features $LUA_FEATURE,$SSL_FEATURE,$CARES_FEATURE --package g3proxy --package g3proxy-ctl --package g3proxy-ftp --package g3proxy-lua --package g3proxy-geoip
+cargo build --frozen --offline --profile %{build_profile} --no-default-features --features $LUA_FEATURE,$SSL_FEATURE,$CARES_FEATURE,hickory,geoip --package g3proxy --package g3proxy-ctl --package g3proxy-ftp --package g3proxy-lua --package g3proxy-geoip
 sh %{name}/service/generate_systemd.sh
 
 
@@ -70,5 +71,5 @@ install -m 644 -D %{name}/service/g3proxy@.service %{buildroot}/lib/systemd/syst
 
 
 %changelog
-* Fri Sep 15 2023 G3proxy Maintainers <g3proxy-maintainers@devel.machine> - 1.7.25.tlcp2-1
+* Mon Nov 13 2023 G3proxy Maintainers <g3proxy-maintainers@devel.machine> - 1.7.29-1
 - New upstream release

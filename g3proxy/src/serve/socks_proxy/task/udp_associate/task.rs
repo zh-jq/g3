@@ -266,10 +266,10 @@ impl SocksProxyUdpAssociateTask {
     async fn run_relay<'a, R>(
         &'a mut self,
         mut clt_tcp_r: R,
-        clt_r: Box<dyn UdpRelayClientRecv + Unpin + Send>,
-        clt_w: Box<dyn UdpRelayClientSend + Unpin + Send>,
-        ups_r: Box<dyn UdpRelayRemoteRecv + Unpin + Send>,
-        ups_w: Box<dyn UdpRelayRemoteSend + Unpin + Send>,
+        mut clt_r: Box<dyn UdpRelayClientRecv + Unpin + Send>,
+        mut clt_w: Box<dyn UdpRelayClientSend + Unpin + Send>,
+        mut ups_r: Box<dyn UdpRelayRemoteRecv + Unpin + Send>,
+        mut ups_w: Box<dyn UdpRelayRemoteSend + Unpin + Send>,
         escape_logger: &'a Logger,
     ) -> ServerTaskResult<()>
     where
@@ -278,9 +278,9 @@ impl SocksProxyUdpAssociateTask {
         let task_id = &self.task_notes.id;
 
         let mut c_to_r =
-            UdpRelayClientToRemote::new(clt_r, ups_w, self.ctx.server_config.udp_relay);
+            UdpRelayClientToRemote::new(&mut *clt_r, &mut *ups_w, self.ctx.server_config.udp_relay);
         let mut r_to_c =
-            UdpRelayRemoteToClient::new(clt_w, ups_r, self.ctx.server_config.udp_relay);
+            UdpRelayRemoteToClient::new(&mut *clt_w, &mut *ups_r, self.ctx.server_config.udp_relay);
 
         let idle_duration = self.ctx.server_config.task_idle_check_duration;
         let mut idle_interval =
@@ -413,10 +413,10 @@ impl SocksProxyUdpAssociateTask {
         );
 
         let buf_len = self.ctx.server_config.udp_relay.packet_size();
-        let mut buf = vec![0u8; buf_len].into_boxed_slice();
+        let mut buf = vec![0u8; buf_len];
 
         let (buf_off, buf_nr, udp_client_addr) = self
-            .recv_first_packet(clt_tcp_r, &mut clt_r, buf.as_mut())
+            .recv_first_packet(clt_tcp_r, &mut clt_r, &mut buf)
             .await?;
         self.udp_client_addr = Some(udp_client_addr);
 
@@ -482,13 +482,7 @@ impl SocksProxyUdpAssociateTask {
         self.task_notes.stage = ServerTaskStage::Connected;
 
         poll_fn(|cx| {
-            ups_w.poll_send_packet(
-                cx,
-                buf.as_mut(),
-                buf_off,
-                buf_nr,
-                &self.udp_notes.initial_peer,
-            )
+            ups_w.poll_send_packet(cx, &buf[buf_off..buf_nr], &self.udp_notes.initial_peer)
         })
         .await?;
 

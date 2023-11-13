@@ -29,7 +29,6 @@ use super::util::AddressFamily;
 pub fn new_std_listener(config: &TcpListenConfig) -> io::Result<std::net::TcpListener> {
     let addr = config.address();
     let socket = new_tcp_socket(AddressFamily::from(&addr))?;
-    socket.set_nonblocking(true)?;
     socket.set_reuse_port(true)?;
     let addr: SockAddr = addr.into();
     if config.is_ipv6only() {
@@ -49,7 +48,6 @@ pub fn new_std_socket_to(
 ) -> io::Result<std::net::TcpStream> {
     let peer_family = AddressFamily::from(&peer_ip);
     let socket = new_tcp_socket(peer_family)?;
-    socket.set_nonblocking(true)?;
     if let Some(ip) = bind_ip {
         if AddressFamily::from(&ip) != peer_family {
             return Err(io::Error::new(
@@ -113,10 +111,21 @@ fn set_misc_opts(
     Ok(())
 }
 
-#[inline]
+#[cfg(target_os = "macos")]
 fn new_tcp_socket(family: AddressFamily) -> io::Result<Socket> {
     let socket = Socket::new(Domain::from(family), Type::STREAM, None)?;
+    socket.set_nonblocking(true)?;
     Ok(socket)
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+fn new_tcp_socket(family: AddressFamily) -> io::Result<Socket> {
+    Socket::new(Domain::from(family), Type::STREAM.nonblocking(), None)
 }
 
 pub fn new_listen_to(config: &TcpListenConfig) -> io::Result<TcpListener> {

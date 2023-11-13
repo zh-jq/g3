@@ -21,6 +21,14 @@ use thiserror::Error;
 
 use g3_types::net::UpstreamAddr;
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use super::UdpRelayPacket;
+
 #[derive(Error, Debug)]
 pub enum UdpRelayClientError {
     #[error("recv failed: {0:?}")]
@@ -41,7 +49,7 @@ pub enum UdpRelayClientError {
 
 pub trait UdpRelayClientRecv {
     /// reserve some space for offloading header
-    fn buf_reserve_length(&self) -> usize;
+    fn max_hdr_len(&self) -> usize;
 
     /// return `(off, len, to)`
     fn poll_recv_packet(
@@ -49,19 +57,38 @@ pub trait UdpRelayClientRecv {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<Result<(usize, usize, UpstreamAddr), UdpRelayClientError>>;
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_recv_packets(
+        &mut self,
+        cx: &mut Context<'_>,
+        packets: &mut [UdpRelayPacket],
+    ) -> Poll<Result<usize, UdpRelayClientError>>;
 }
 
 pub trait UdpRelayClientSend {
-    /// reserve some space for adding header
-    fn buf_reserve_length(&self) -> usize;
-
     /// return `nw`, which should be greater than 0
     fn poll_send_packet(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-        buf_off: usize,
-        buf_len: usize,
+        buf: &[u8],
         from: &UpstreamAddr,
+    ) -> Poll<Result<usize, UdpRelayClientError>>;
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_send_packets(
+        &mut self,
+        cx: &mut Context<'_>,
+        packets: &[UdpRelayPacket],
     ) -> Poll<Result<usize, UdpRelayClientError>>;
 }

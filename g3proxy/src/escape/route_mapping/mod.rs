@@ -19,11 +19,10 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
-use rand::seq::SliceRandom;
 
 use g3_daemon::stat::remote::ArcTcpConnectionTaskRemoteStats;
 use g3_types::metrics::MetricsName;
-use g3_types::net::{OpensslTlsClientConfig, UpstreamAddr};
+use g3_types::net::{OpensslClientConfig, UpstreamAddr};
 use g3_types::route::EgressPathSelection;
 
 use super::{ArcEscaper, Escaper, EscaperInternal, RouteEscaperStats};
@@ -90,10 +89,7 @@ impl RouteMappingEscaper {
     }
 
     fn random_next(&self) -> ArcEscaper {
-        let mut rng = rand::thread_rng();
-
-        self.next_nodes
-            .choose(&mut rng)
+        fastrand::choice(&self.next_nodes)
             .unwrap_or(&self.next_nodes[0])
             .clone()
     }
@@ -144,7 +140,7 @@ impl Escaper for RouteMappingEscaper {
         tcp_notes: &'a mut TcpConnectTaskNotes,
         task_notes: &'a ServerTaskNotes,
         task_stats: ArcTcpConnectionTaskRemoteStats,
-        tls_config: &'a OpensslTlsClientConfig,
+        tls_config: &'a OpensslClientConfig,
         tls_name: &'a str,
     ) -> TcpConnectResult {
         tcp_notes.escaper.clone_from(&self.config.name);
@@ -254,7 +250,7 @@ impl EscaperInternal for RouteMappingEscaper {
         tcp_notes: &'a mut TcpConnectTaskNotes,
         _task_notes: &'a ServerTaskNotes,
         _task_stats: ArcHttpForwardTaskRemoteStats,
-        _tls_config: &'a OpensslTlsClientConfig,
+        _tls_config: &'a OpensslClientConfig,
         _tls_name: &'a str,
     ) -> Result<BoxHttpForwardConnection, TcpConnectError> {
         tcp_notes.escaper.clone_from(&self.config.name);

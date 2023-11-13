@@ -14,9 +14,17 @@
  * limitations under the License.
  */
 
+use std::io;
 use std::task::{ready, Context, Poll};
 
 use g3_io_ext::{AsyncUdpSend, UdpCopyRemoteError, UdpCopyRemoteSend};
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use g3_io_ext::{SendMsgHdr, UdpCopyPacket};
 
 pub(crate) struct DirectUdpConnectRemoteSend<T> {
     inner: T,
@@ -35,19 +43,51 @@ impl<T> UdpCopyRemoteSend for DirectUdpConnectRemoteSend<T>
 where
     T: AsyncUdpSend,
 {
-    fn buf_reserve_length(&self) -> usize {
-        0
-    }
-
     fn poll_send_packet(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-        buf_off: usize,
-        buf_len: usize,
+        buf: &[u8],
     ) -> Poll<Result<usize, UdpCopyRemoteError>> {
-        let nw = ready!(self.inner.poll_send(cx, &buf[buf_off..buf_len]))
+        let nw = ready!(self.inner.poll_send(cx, buf)).map_err(UdpCopyRemoteError::SendFailed)?;
+        if nw == 0 {
+            Poll::Ready(Err(UdpCopyRemoteError::SendFailed(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "write zero byte into sender",
+            ))))
+        } else {
+            Poll::Ready(Ok(nw))
+        }
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_send_packets(
+        &mut self,
+        cx: &mut Context<'_>,
+        packets: &[UdpCopyPacket],
+    ) -> Poll<Result<usize, UdpCopyRemoteError>> {
+        use std::io::IoSlice;
+
+        let msgs: Vec<SendMsgHdr<1>> = packets
+            .iter()
+            .map(|p| SendMsgHdr {
+                iov: [IoSlice::new(p.payload())],
+                addr: None,
+            })
+            .collect();
+        let count = ready!(self.inner.poll_batch_sendmsg(cx, &msgs))
             .map_err(UdpCopyRemoteError::SendFailed)?;
-        Poll::Ready(Ok(nw))
+        if count == 0 {
+            Poll::Ready(Err(UdpCopyRemoteError::SendFailed(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "write zero packet into sender",
+            ))))
+        } else {
+            Poll::Ready(Ok(count))
+        }
     }
 }

@@ -301,6 +301,7 @@ fn build_cli_args() -> Command {
             ARG_EC256,
             ARG_EC384,
             ARG_EC521,
+            ARG_SM2,
             ARG_ED25519,
             ARG_ED448,
             ARG_X25519,
@@ -477,9 +478,13 @@ fn generate_root(args: ArgMatches) -> anyhow::Result<()> {
     let mut builder = if let Some(bits) = args.get_one::<u32>(ARG_RSA) {
         RootCertBuilder::new_rsa(*bits)?
     } else if args.get_flag(ARG_X448) {
-        RootCertBuilder::new_x448()?
+        return Err(anyhow!(
+            "x448 can not be used in certification authority certificate"
+        ));
     } else if args.get_flag(ARG_X25519) {
-        RootCertBuilder::new_x25519()?
+        return Err(anyhow!(
+            "x25519 can not be used in certification authority certificate"
+        ));
     } else if args.get_flag(ARG_ED448) {
         RootCertBuilder::new_ed448()?
     } else if args.get_flag(ARG_ED25519) {
@@ -517,9 +522,13 @@ fn generate_intermediate(args: ArgMatches) -> anyhow::Result<()> {
     let mut builder = if let Some(bits) = args.get_one::<u32>(ARG_RSA) {
         IntermediateCertBuilder::new_rsa(*bits)?
     } else if args.get_flag(ARG_X448) {
-        IntermediateCertBuilder::new_x448()?
+        return Err(anyhow!(
+            "x448 can not be used in certification authority certificate"
+        ));
     } else if args.get_flag(ARG_X25519) {
-        IntermediateCertBuilder::new_x25519()?
+        return Err(anyhow!(
+            "x25519 can not be used in certification authority certificate"
+        ));
     } else if args.get_flag(ARG_ED448) {
         IntermediateCertBuilder::new_ed448()?
     } else if args.get_flag(ARG_ED25519) {

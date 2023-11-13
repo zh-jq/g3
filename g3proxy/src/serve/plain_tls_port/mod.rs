@@ -23,11 +23,12 @@ use log::debug;
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, watch};
+use tokio_openssl::SslStream;
 use tokio_rustls::{server::TlsStream, TlsAcceptor};
 
 use g3_daemon::listen::ListenStats;
 use g3_daemon::server::ClientConnectionInfo;
-use g3_io_ext::haproxy::ProxyProtocolV2Reader;
+use g3_io_ext::haproxy::{ProxyProtocolV1Reader, ProxyProtocolV2Reader};
 use g3_types::acl::{AclAction, AclNetworkRule};
 use g3_types::metrics::MetricsName;
 use g3_types::net::{ProxyProtocolVersion, RustlsServerConfig};
@@ -83,9 +84,15 @@ impl AuxiliaryServerConfig for PlainTlsPortAuxConfig {
             let mut cc_info = cc_info;
             match proxy_protocol {
                 Some(ProxyProtocolVersion::V1) => {
-                    // TODO support proxy protocol v1
-                    listen_stats.add_dropped();
-                    return;
+                    let mut parser = ProxyProtocolV1Reader::new(proxy_protocol_read_timeout);
+                    match parser.read_proxy_protocol_v1_for_tcp(&mut stream).await {
+                        Ok(Some(a)) => cc_info.set_proxy_addr(a),
+                        Ok(None) => {}
+                        Err(e) => {
+                            listen_stats.add_by_proxy_protocol_error(e);
+                            return;
+                        }
+                    }
                 }
                 Some(ProxyProtocolVersion::V2) => {
                     let mut parser = ProxyProtocolV2Reader::new(proxy_protocol_read_timeout);
@@ -102,7 +109,7 @@ impl AuxiliaryServerConfig for PlainTlsPortAuxConfig {
             }
 
             match tokio::time::timeout(tls_accept_timeout, tls_acceptor.accept(stream)).await {
-                Ok(Ok(tls_stream)) => next_server.run_tls_task(tls_stream, cc_info, ctx).await,
+                Ok(Ok(tls_stream)) => next_server.run_rustls_task(tls_stream, cc_info, ctx).await,
                 Ok(Err(e)) => {
                     listen_stats.add_failed();
                     debug!(
@@ -326,9 +333,17 @@ impl Server for PlainTlsPort {
     ) {
     }
 
-    async fn run_tls_task(
+    async fn run_rustls_task(
         &self,
         _stream: TlsStream<TcpStream>,
+        _cc_info: ClientConnectionInfo,
+        _ctx: ServerRunContext,
+    ) {
+    }
+
+    async fn run_openssl_task(
+        &self,
+        _stream: SslStream<TcpStream>,
         _cc_info: ClientConnectionInfo,
         _ctx: ServerRunContext,
     ) {

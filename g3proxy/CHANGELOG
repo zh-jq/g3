@@ -1,4 +1,27 @@
 
+v1.7.29:
+ - Feature: add OpenSSL based NativeTlsPort server
+ - Feature: allow to chain TcpStream after ports server
+ - Feature: make hickory-dns as an optional feature
+ - Feature: add new max_udp_queries config option to c-ares resolver
+ - Optimization: use sendmmsg / recvmmsg for UDP io
+
+v1.7.28:
+ - BUG FIX: fix server ingress net acl check for traffic from extra tls ports
+ - Feature: support PROXY Protocol v1 in PlainTcpPort and PlainTlsPort
+ - Feature: support PROXY Protocol in IntelliProxy port
+
+v1.7.27:
+ - Optimization: set default c-ares init options as c-ares 1.20.1 default values
+ - Optimization: reduce rustls server session cache lock contention
+ - Feature: rename trust-dns resolver type to hickory to be sync with upstream
+ - Feature: add dns over http/3 support in hickory resolver
+ - Feature: use tcp peer ip if socks5 proxy returns unspecified udp peer ip
+
+v1.7.26:
+ - BUG FIX: fix deb and rpm build scripts
+ - BUG FIX: fix parse of cert_pairs of tls server config in various servers
+
 v1.7.25:
  - Feature: add route_geoip escaper
  - Feature: various improvements to journal logging

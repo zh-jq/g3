@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-use std::io;
+use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
@@ -23,6 +23,13 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use tokio::time::{Instant, Sleep};
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use super::SendMsgHdr;
 use crate::limit::{DatagramLimitInfo, DatagramLimitResult};
 use crate::ArcLimitedSendStats;
 
@@ -35,6 +42,25 @@ pub trait AsyncUdpSend {
     ) -> Poll<io::Result<usize>>;
 
     fn poll_send(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>>;
+
+    fn poll_sendmsg(
+        &mut self,
+        cx: &mut Context<'_>,
+        iov: &[IoSlice<'_>],
+        target: Option<SocketAddr>,
+    ) -> Poll<io::Result<usize>>;
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_batch_sendmsg<const C: usize>(
+        &mut self,
+        cx: &mut Context<'_>,
+        msgs: &[SendMsgHdr<'_, C>],
+    ) -> Poll<io::Result<usize>>;
 }
 
 pub struct LimitedUdpSend<T> {
@@ -80,7 +106,7 @@ where
         if self.limit.is_set() {
             let dur_millis = self.started.elapsed().as_millis() as u64;
             match self.limit.check_packet(dur_millis, buf.len()) {
-                DatagramLimitResult::Advance => {
+                DatagramLimitResult::Advance(_) => {
                     let nw = ready!(self.inner.poll_send_to(cx, buf, target))?;
                     self.limit.set_advance(1, nw);
                     self.stats.add_send_packet();
@@ -106,7 +132,7 @@ where
         if self.limit.is_set() {
             let dur_millis = self.started.elapsed().as_millis() as u64;
             match self.limit.check_packet(dur_millis, buf.len()) {
-                DatagramLimitResult::Advance => {
+                DatagramLimitResult::Advance(_) => {
                     let nw = ready!(self.inner.poll_send(cx, buf))?;
                     self.limit.set_advance(1, nw);
                     self.stats.add_send_packet();
@@ -125,6 +151,87 @@ where
             self.stats.add_send_packet();
             self.stats.add_send_bytes(nw);
             Poll::Ready(Ok(nw))
+        }
+    }
+
+    fn poll_sendmsg(
+        &mut self,
+        cx: &mut Context<'_>,
+        iov: &[IoSlice<'_>],
+        target: Option<SocketAddr>,
+    ) -> Poll<io::Result<usize>> {
+        if self.limit.is_set() {
+            let dur_millis = self.started.elapsed().as_millis() as u64;
+            let len = iov.iter().map(|v| v.len()).sum();
+            match self.limit.check_packet(dur_millis, len) {
+                DatagramLimitResult::Advance(_) => {
+                    let nw = ready!(self.inner.poll_sendmsg(cx, iov, target))?;
+                    self.limit.set_advance(1, nw);
+                    self.stats.add_send_packet();
+                    self.stats.add_send_bytes(nw);
+                    Poll::Ready(Ok(nw))
+                }
+                DatagramLimitResult::DelayFor(ms) => {
+                    self.delay
+                        .as_mut()
+                        .reset(self.started + Duration::from_millis(dur_millis + ms));
+                    self.delay.poll_unpin(cx).map(|_| Ok(0))
+                }
+            }
+        } else {
+            let nw = ready!(self.inner.poll_sendmsg(cx, iov, target))?;
+            self.stats.add_send_packet();
+            self.stats.add_send_bytes(nw);
+            Poll::Ready(Ok(nw))
+        }
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_batch_sendmsg<const C: usize>(
+        &mut self,
+        cx: &mut Context<'_>,
+        msgs: &[SendMsgHdr<'_, C>],
+    ) -> Poll<io::Result<usize>> {
+        if self.limit.is_set() {
+            let dur_millis = self.started.elapsed().as_millis() as u64;
+            let len = msgs.iter().flat_map(|h| h.iov).map(|v| v.len()).sum();
+            match self.limit.check_packet(dur_millis, len) {
+                DatagramLimitResult::Advance(n) => {
+                    let count = ready!(self.inner.poll_batch_sendmsg(cx, &msgs[0..n]))?;
+                    let len = msgs
+                        .iter()
+                        .take(count)
+                        .flat_map(|h| h.iov)
+                        .map(|v| v.len())
+                        .sum();
+                    self.limit.set_advance(count, len);
+                    self.stats.add_send_packets(count);
+                    self.stats.add_send_bytes(len);
+                    Poll::Ready(Ok(count))
+                }
+                DatagramLimitResult::DelayFor(ms) => {
+                    self.delay
+                        .as_mut()
+                        .reset(self.started + Duration::from_millis(dur_millis + ms));
+                    self.delay.poll_unpin(cx).map(|_| Ok(0))
+                }
+            }
+        } else {
+            let count = ready!(self.inner.poll_batch_sendmsg(cx, msgs))?;
+            self.stats.add_send_packets(count);
+            self.stats.add_send_bytes(
+                msgs.iter()
+                    .take(count)
+                    .flat_map(|h| h.iov)
+                    .map(|v| v.len())
+                    .sum(),
+            );
+            Poll::Ready(Ok(count))
         }
     }
 }

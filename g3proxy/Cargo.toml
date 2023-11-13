@@ -1,9 +1,9 @@
 [package]
 name = "g3proxy"
-version = "1.7.25-tlcp2"
+version = "1.7.29"
 license.workspace = true
 edition.workspace = true
-rust-version = "1.72.0"
+rust-version = "1.73.0"
 description = "G3 generic proxy"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -20,6 +20,7 @@ once_cell.workspace = true
 futures-util.workspace = true
 nix.workspace = true
 rand.workspace = true
+fastrand.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "rt", "signal", "sync", "time", "io-util", "net", "fs"] }
 tokio-util = { workspace = true, features = ["time"] }
 tokio-rustls.workspace = true
@@ -72,7 +73,7 @@ g3-yaml = { workspace = true, features = ["resolve", "rustls", "openssl", "acl-r
 g3-json = { workspace = true, features = ["acl-rule", "resolve", "http", "rustls", "openssl", "proxy"] }
 g3-msgpack.workspace = true
 g3-io-ext.workspace = true
-g3-resolver = { workspace = true, features = ["trust-dns"] }
+g3-resolver.workspace = true
 g3-xcrypt.workspace = true
 g3-ftp-client.workspace = true
 g3-http.workspace = true
@@ -92,7 +93,7 @@ tokio-util = { workspace = true, features = ["io"] }
 rustc_version.workspace = true
 
 [features]
-default = ["lua54", "python", "c-ares", "geoip"]
+default = ["lua54", "python", "c-ares", "hickory", "geoip"]
 lua = ["mlua"]
 luajit = ["lua", "mlua/luajit"]
 lua51 = ["lua", "mlua/lua51"]
@@ -100,6 +101,7 @@ lua53 = ["lua", "mlua/lua53"]
 lua54 = ["lua", "mlua/lua54"]
 python = ["pyo3"]
 c-ares = ["g3-resolver/c-ares"]
+hickory = ["g3-resolver/hickory"]
 geoip = ["g3-geoip", "g3-yaml/geoip", "fixedbitset", "rustc-hash", "fnv"]
 vendored-openssl = ["openssl/vendored", "dep:openssl-probe"]
 vendored-tongsuo = ["openssl/tongsuo", "dep:openssl-probe", "g3-yaml/vendored-tongsuo", "g3-json/vendored-tongsuo"]

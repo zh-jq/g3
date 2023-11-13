@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
-use cadence::StatsdClient;
+use cadence::{Gauged, StatsdClient};
 use hdrhistogram::Histogram;
 use tokio::signal::unix::SignalKind;
 use tokio::sync::{mpsc, Barrier, Semaphore};
@@ -50,9 +50,60 @@ pub mod h3;
 pub mod keyless;
 pub mod ssl;
 
+const QUANTILE: &str = "quantile";
+
 trait BenchHistogram {
     fn refresh(&mut self);
     fn emit(&self, client: &StatsdClient);
+
+    fn emit_histogram(&self, client: &StatsdClient, histogram: &Histogram<u64>, key: &str) {
+        let min = histogram.min();
+        client
+            .gauge_with_tags(key, min)
+            .with_tag(QUANTILE, "min")
+            .send();
+        let max = histogram.max();
+        client
+            .gauge_with_tags(key, max)
+            .with_tag(QUANTILE, "max")
+            .send();
+        let mean = histogram.mean();
+        client
+            .gauge_with_tags(key, mean)
+            .with_tag(QUANTILE, "mean")
+            .send();
+        let pct50 = histogram.value_at_quantile(0.50);
+        client
+            .gauge_with_tags(key, pct50)
+            .with_tag(QUANTILE, "0.50")
+            .send();
+        let pct80 = histogram.value_at_quantile(0.80);
+        client
+            .gauge_with_tags(key, pct80)
+            .with_tag(QUANTILE, "0.80")
+            .send();
+        let pct90 = histogram.value_at_quantile(0.90);
+        client
+            .gauge_with_tags(key, pct90)
+            .with_tag(QUANTILE, "0.90")
+            .send();
+        let pct95 = histogram.value_at_quantile(0.95);
+        client
+            .gauge_with_tags(key, pct95)
+            .with_tag(QUANTILE, "0.95")
+            .send();
+        let pct98 = histogram.value_at_quantile(0.98);
+        client
+            .gauge_with_tags(key, pct98)
+            .with_tag(QUANTILE, "0.98")
+            .send();
+        let pct99 = histogram.value_at_quantile(0.99);
+        client
+            .gauge_with_tags(key, pct99)
+            .with_tag(QUANTILE, "0.99")
+            .send();
+    }
+
     fn summary(&self);
 
     fn summary_histogram_title(title: &str) {
@@ -68,7 +119,7 @@ trait BenchHistogram {
         let d_min = h.min();
         let d_mean = h.mean();
         let d_std_dev = h.stdev();
-        let d_pct90 = h.value_at_quantile(0.9);
+        let d_pct90 = h.value_at_quantile(0.90);
         let d_max = h.max();
 
         println!(
@@ -82,7 +133,7 @@ trait BenchHistogram {
         let t_min = Duration::from_nanos(h.min());
         let t_mean = Duration::from_secs_f64(h.mean() / NANOS_PER_SEC);
         let t_std_dev = Duration::from_secs_f64(h.stdev() / NANOS_PER_SEC);
-        let t_pct90 = Duration::from_nanos(h.value_at_quantile(0.9));
+        let t_pct90 = Duration::from_nanos(h.value_at_quantile(0.90));
         let t_max = Duration::from_nanos(h.max());
 
         println!(
@@ -179,6 +230,7 @@ where
 
         let task_unconstrained = proc_args.task_unconstrained;
         let latency = proc_args.latency;
+        let ignore_fatal_error = proc_args.ignore_fatal_error;
         let rt = super::worker::select_handle(i).unwrap_or_else(tokio::runtime::Handle::current);
         rt.spawn(async move {
             sem.add_permits(1);
@@ -217,15 +269,21 @@ where
                     Err(BenchError::Fatal(e)) => {
                         context.mark_task_failed();
                         global_state.add_failed();
-                        eprintln!("!! Fatal error with task context {i}: {e:?}");
-                        break;
+                        if ignore_fatal_error {
+                            if global_state.check_log_error() {
+                                eprintln!("! request {task_id} failed: {e:?}\n");
+                            }
+                        } else {
+                            eprintln!("!! Fatal error with task context {i}: {e:?}");
+                            break;
+                        }
                     }
                     Err(BenchError::Task(e)) => {
                         context.mark_task_failed();
+                        global_state.add_failed();
                         if global_state.check_log_error() {
                             eprintln!("! request {task_id} failed: {e:?}\n");
                         }
-                        global_state.add_failed();
                     }
                 }
                 req_count += 1;
@@ -275,7 +333,46 @@ where
             None
         };
     // histogram runtime stats
-    let histogram_stats = target.take_histogram();
+    let histogram_stats_handler = if let Some(mut histogram) = target.take_histogram() {
+        let quit_notifier = quit_notifier.clone();
+        let thread_builder = std::thread::Builder::new().name("histogram".to_string());
+        if let Some((statsd_client, emit_duration)) = proc_args.new_statsd_client() {
+            let handler = thread_builder
+                .spawn(move || {
+                    loop {
+                        histogram.refresh();
+                        histogram.emit(&statsd_client);
+
+                        if quit_notifier.load(Ordering::Relaxed) {
+                            break;
+                        }
+
+                        std::thread::sleep(emit_duration);
+                    }
+                    histogram
+                })
+                .map_err(|e| anyhow!("failed to create histogram metrics thread: {e}"))?;
+            Some(handler)
+        } else {
+            let handler = thread_builder
+                .spawn(move || {
+                    loop {
+                        histogram.refresh();
+
+                        if quit_notifier.load(Ordering::Relaxed) {
+                            break;
+                        }
+
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    histogram
+                })
+                .map_err(|e| anyhow!("failed to create histogram refresh thread: {e}"))?;
+            Some(handler)
+        }
+    } else {
+        None
+    };
 
     let time_start = Instant::now();
     sync_barrier.wait().await;
@@ -312,9 +409,14 @@ where
     H::summary_newline();
     target.notify_finish();
     target.fetch_runtime_stats().summary(total_time);
-    if let Some(mut histogram) = histogram_stats {
-        histogram.refresh();
-        histogram.summary();
+    if let Some(handler) = histogram_stats_handler {
+        match handler.join() {
+            Ok(mut histogram) => {
+                histogram.refresh();
+                histogram.summary();
+            }
+            Err(e) => eprintln!("error to join histogram stats thread: {e:?}"),
+        }
     }
     Ok(())
 }

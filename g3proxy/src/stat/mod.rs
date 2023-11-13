@@ -16,7 +16,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context};
 use cadence::StatsdClient;
@@ -26,8 +26,8 @@ use g3_statsd::client::StatsdClientConfig;
 
 pub(crate) mod types;
 
-mod metric;
-pub(crate) use metric::user_site;
+mod metrics;
+pub(crate) use metrics::user_site;
 
 static QUIT_STAT_THREAD: AtomicBool = AtomicBool::new(false);
 
@@ -54,18 +54,6 @@ fn build_statsd_client(config: &StatsdClientConfig) -> anyhow::Result<StatsdClie
     Ok(client)
 }
 
-fn wait_duration(emit_duration: Duration, instant_start: Instant) {
-    let instant_now = Instant::now();
-    if let Some(instant_next) = instant_start.checked_add(emit_duration) {
-        // re-calculate the duration
-        if let Some(dur) = instant_next.checked_duration_since(instant_now) {
-            std::thread::sleep(dur);
-        }
-    } else {
-        std::thread::sleep(emit_duration);
-    }
-}
-
 fn spawn_main_thread(config: &StatsdClientConfig) -> anyhow::Result<JoinHandle<()>> {
     let client = build_statsd_client(config).context("failed to build statsd client")?;
 
@@ -75,16 +63,16 @@ fn spawn_main_thread(config: &StatsdClientConfig) -> anyhow::Result<JoinHandle<(
         .spawn(move || loop {
             let instant_start = Instant::now();
 
-            metric::server::sync_stats();
-            metric::escaper::sync_stats();
-            metric::resolver::sync_stats();
-            metric::user::sync_stats();
+            metrics::server::sync_stats();
+            metrics::escaper::sync_stats();
+            metrics::resolver::sync_stats();
+            metrics::user::sync_stats();
             g3_daemon::log::metric::sync_stats();
 
-            metric::server::emit_stats(&client);
-            metric::escaper::emit_stats(&client);
-            metric::resolver::emit_stats(&client);
-            metric::user::emit_stats(&client);
+            metrics::server::emit_stats(&client);
+            metrics::escaper::emit_stats(&client);
+            metrics::resolver::emit_stats(&client);
+            metrics::user::emit_stats(&client);
             g3_daemon::log::metric::emit_stats(&client);
 
             client.flush_sink();
@@ -93,7 +81,7 @@ fn spawn_main_thread(config: &StatsdClientConfig) -> anyhow::Result<JoinHandle<(
                 break;
             }
 
-            wait_duration(emit_duration, instant_start);
+            g3_daemon::stat::emit::wait_duration(emit_duration, instant_start);
         })
         .map_err(|e| anyhow!("failed to spawn thread: {e:?}"))?;
     Ok(handle)
@@ -117,7 +105,7 @@ fn spawn_user_site_thread(config: &StatsdClientConfig) -> anyhow::Result<JoinHan
                 break;
             }
 
-            wait_duration(emit_duration, instant_start);
+            g3_daemon::stat::emit::wait_duration(emit_duration, instant_start);
         })
         .map_err(|e| anyhow!("failed to spawn thread: {e:?}"))?;
     Ok(handle)

@@ -18,6 +18,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::task::{ready, Context, Poll};
 
 use g3_io_ext::{AsyncUdpRecv, UdpRelayRemoteError, UdpRelayRemoteRecv};
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use g3_io_ext::{RecvMsgBuf, RecvMsgHdr, UdpRelayPacket};
 use g3_types::net::UpstreamAddr;
 
 pub(crate) struct DirectUdpRelayRemoteRecv<T> {
@@ -86,13 +93,47 @@ where
             (None, None) => Poll::Ready(Err(UdpRelayRemoteError::NoListenSocket)),
         }
     }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_recv_packets(
+        inner: &mut T,
+        bind_addr: SocketAddr,
+        cx: &mut Context<'_>,
+        packets: &mut [UdpRelayPacket],
+    ) -> Poll<Result<usize, UdpRelayRemoteError>> {
+        let mut meta = vec![RecvMsgHdr::default(); packets.len()];
+        let mut bufs: Vec<_> = packets
+            .iter_mut()
+            .map(|p| RecvMsgBuf::new(p.buf_mut()))
+            .collect();
+
+        let count = ready!(inner.poll_batch_recvmsg(cx, &mut bufs, &mut meta))
+            .map_err(|e| UdpRelayRemoteError::RecvFailed(bind_addr, e))?;
+
+        for (p, m) in packets.iter_mut().take(count).zip(meta) {
+            let addr = m.addr.unwrap_or_else(|| match bind_addr {
+                SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+            });
+            p.set_offset(0);
+            p.set_length(m.len);
+            p.set_upstream(UpstreamAddr::from(addr));
+        }
+
+        Poll::Ready(Ok(count))
+    }
 }
 
 impl<T> UdpRelayRemoteRecv for DirectUdpRelayRemoteRecv<T>
 where
     T: AsyncUdpRecv + Send,
 {
-    fn buf_reserve_length(&self) -> usize {
+    fn max_hdr_len(&self) -> usize {
         0
     }
 
@@ -102,10 +143,30 @@ where
         buf: &mut [u8],
     ) -> Poll<Result<(usize, usize, UpstreamAddr), UdpRelayRemoteError>> {
         let (off, nr, addr) = ready!(self.poll_recv_packet(cx, buf))?;
-        Poll::Ready(Ok((
-            off,
-            nr,
-            UpstreamAddr::from_ip_and_port(addr.ip(), addr.port()),
-        )))
+        Poll::Ready(Ok((off, nr, UpstreamAddr::from(addr))))
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_recv_packets(
+        &mut self,
+        cx: &mut Context<'_>,
+        packets: &mut [UdpRelayPacket],
+    ) -> Poll<Result<usize, UdpRelayRemoteError>> {
+        match (&mut self.inner_v4, &mut self.inner_v6) {
+            (Some(inner_v4), Some(inner_v6)) => {
+                match Self::poll_recv_packets(inner_v4, self.bind_v4, cx, packets) {
+                    Poll::Ready(r) => Poll::Ready(r),
+                    Poll::Pending => Self::poll_recv_packets(inner_v6, self.bind_v6, cx, packets),
+                }
+            }
+            (Some(inner_v4), None) => Self::poll_recv_packets(inner_v4, self.bind_v4, cx, packets),
+            (None, Some(inner_v6)) => Self::poll_recv_packets(inner_v6, self.bind_v6, cx, packets),
+            (None, None) => Poll::Ready(Err(UdpRelayRemoteError::NoListenSocket)),
+        }
     }
 }

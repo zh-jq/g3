@@ -23,7 +23,10 @@ mod x509_builder;
 pub use x509_builder::X509BuilderExt;
 
 mod x509_pubkey;
-pub use x509_pubkey::{X509Pubkey, X509PubkeyRef};
+use x509_pubkey::{X509Pubkey, X509PubkeyRef};
 
 mod rsa;
 pub use rsa::RsaExt;
+
+mod pkey;
+pub use pkey::PublicKeyExt;

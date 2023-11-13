@@ -18,8 +18,6 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 
-use rand::distributions::Uniform;
-use rand::Rng;
 use socket2::{Domain, SockAddr, Socket, Type};
 
 use g3_types::net::{PortRange, SocketBufferConfig, UdpMiscSockOpts};
@@ -35,7 +33,6 @@ pub fn new_std_socket_to(
 ) -> io::Result<UdpSocket> {
     let peer_family = AddressFamily::from(&peer_addr);
     let socket = new_udp_socket(peer_family, buf_conf)?;
-    socket.set_nonblocking(true)?;
     if let Some(ip) = bind_ip {
         if AddressFamily::from(&ip) != peer_family {
             return Err(io::Error::new(
@@ -61,7 +58,6 @@ pub fn new_std_bind_connect(
         None => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
     };
     let socket = new_udp_socket(AddressFamily::from(&bind_addr), buf_conf)?;
-    socket.set_nonblocking(true)?;
     set_misc_opts(&socket, misc_opts)?;
     let bind_addr = SockAddr::from(bind_addr);
     socket.bind(&bind_addr)?;
@@ -83,15 +79,12 @@ pub fn new_std_in_range_bind_connect(
     debug_assert!(port_start < port_end);
 
     let socket = new_udp_socket(AddressFamily::from(&bind_ip), buf_conf)?;
-    socket.set_nonblocking(true)?;
     set_misc_opts(&socket, misc_opts)?;
 
     // like what's has been done in dante/sockd/sockd_request.c
-    let side = Uniform::new_inclusive(port_start, port_end);
-    let mut rng = rand::thread_rng();
     let tries = port.count().min(10);
     for _i in 0..tries {
-        let port = rng.sample(side);
+        let port = fastrand::u16(port_start..=port_end);
         let bind_addr: SockAddr = SocketAddr::new(bind_ip, port).into();
         if socket.bind(&bind_addr).is_ok() {
             let socket = UdpSocket::from(socket);
@@ -129,7 +122,6 @@ pub fn new_std_bind_relay(
         },
     };
     let socket = new_udp_socket(AddressFamily::from(&bind_addr), buf_conf)?;
-    socket.set_nonblocking(true)?;
     let bind_addr = SockAddr::from(bind_addr);
     socket.bind(&bind_addr)?;
     set_misc_opts(&socket, misc_opts)?;
@@ -158,7 +150,7 @@ fn set_misc_opts(socket: &Socket, misc_opts: &UdpMiscSockOpts) -> io::Result<()>
 }
 
 fn new_udp_socket(family: AddressFamily, buf_conf: SocketBufferConfig) -> io::Result<Socket> {
-    let socket = Socket::new(Domain::from(family), Type::DGRAM, None)?;
+    let socket = new_nonblocking_udp_socket(family)?;
     if let Some(size) = buf_conf.recv_size() {
         socket.set_recv_buffer_size(size)?;
     }
@@ -166,6 +158,23 @@ fn new_udp_socket(family: AddressFamily, buf_conf: SocketBufferConfig) -> io::Re
         socket.set_send_buffer_size(size)?;
     }
     Ok(socket)
+}
+
+#[cfg(target_os = "macos")]
+fn new_nonblocking_udp_socket(family: AddressFamily) -> io::Result<Socket> {
+    let socket = Socket::new(Domain::from(family), Type::DGRAM, None)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket)
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+fn new_nonblocking_udp_socket(family: AddressFamily) -> io::Result<Socket> {
+    Socket::new(Domain::from(family), Type::DGRAM.nonblocking(), None)
 }
 
 #[cfg(test)]

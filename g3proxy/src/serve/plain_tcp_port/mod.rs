@@ -22,11 +22,12 @@ use async_trait::async_trait;
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, watch};
+use tokio_openssl::SslStream;
 use tokio_rustls::server::TlsStream;
 
 use g3_daemon::listen::ListenStats;
 use g3_daemon::server::ClientConnectionInfo;
-use g3_io_ext::haproxy::ProxyProtocolV2Reader;
+use g3_io_ext::haproxy::{ProxyProtocolV1Reader, ProxyProtocolV2Reader};
 use g3_types::acl::{AclAction, AclNetworkRule};
 use g3_types::metrics::MetricsName;
 use g3_types::net::ProxyProtocolVersion;
@@ -75,14 +76,21 @@ impl AuxiliaryServerConfig for PlainTcpPortAuxConfig {
                 }
             }
 
+            let mut stream = stream;
             let mut cc_info = cc_info;
             match proxy_protocol {
                 Some(ProxyProtocolVersion::V1) => {
-                    // TODO support proxy protocol v1
-                    listen_stats.add_dropped();
+                    let mut parser = ProxyProtocolV1Reader::new(proxy_protocol_read_timeout);
+                    match parser.read_proxy_protocol_v1_for_tcp(&mut stream).await {
+                        Ok(Some(a)) => {
+                            cc_info.set_proxy_addr(a);
+                            next_server.run_tcp_task(stream, cc_info, ctx).await
+                        }
+                        Ok(None) => next_server.run_tcp_task(stream, cc_info, ctx).await,
+                        Err(e) => listen_stats.add_by_proxy_protocol_error(e),
+                    }
                 }
                 Some(ProxyProtocolVersion::V2) => {
-                    let mut stream = stream;
                     let mut parser = ProxyProtocolV2Reader::new(proxy_protocol_read_timeout);
                     match parser.read_proxy_protocol_v2_for_tcp(&mut stream).await {
                         Ok(Some(a)) => {
@@ -279,9 +287,17 @@ impl Server for PlainTcpPort {
     ) {
     }
 
-    async fn run_tls_task(
+    async fn run_rustls_task(
         &self,
         _stream: TlsStream<TcpStream>,
+        _cc_info: ClientConnectionInfo,
+        _ctx: ServerRunContext,
+    ) {
+    }
+
+    async fn run_openssl_task(
+        &self,
+        _stream: SslStream<TcpStream>,
         _cc_info: ClientConnectionInfo,
         _ctx: ServerRunContext,
     ) {

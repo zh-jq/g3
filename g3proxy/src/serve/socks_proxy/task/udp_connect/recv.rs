@@ -20,6 +20,13 @@ use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
 use g3_io_ext::{AsyncUdpRecv, UdpCopyClientError, UdpCopyClientRecv};
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use g3_io_ext::{RecvMsgBuf, RecvMsgHdr, UdpCopyPacket};
 use g3_socks::v5::UdpInput;
 use g3_types::acl::{AclAction, AclNetworkRule};
 use g3_types::net::UpstreamAddr;
@@ -135,7 +142,7 @@ where
     T: AsyncUdpRecv + Send,
 {
     /// reserve some space for offloading header
-    fn buf_reserve_length(&self) -> usize {
+    fn max_hdr_len(&self) -> usize {
         256 + 4 + 2
     }
 
@@ -150,5 +157,39 @@ where
         } else {
             Poll::Ready(Err(UdpCopyClientError::VaryUpstream))
         }
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_recv_packets(
+        &mut self,
+        cx: &mut Context<'_>,
+        packets: &mut [UdpCopyPacket],
+    ) -> Poll<Result<usize, UdpCopyClientError>> {
+        let mut meta = vec![RecvMsgHdr::default(); packets.len()];
+        let mut bufs: Vec<_> = packets
+            .iter_mut()
+            .map(|p| RecvMsgBuf::new(p.buf_mut()))
+            .collect();
+
+        let count = ready!(self.inner.poll_batch_recvmsg(cx, &mut bufs, &mut meta))
+            .map_err(UdpCopyClientError::RecvFailed)?;
+
+        for (p, m) in packets.iter_mut().take(count).zip(meta) {
+            let (off, upstream) = UdpInput::parse_header(&p.buf()[0..m.len])
+                .map_err(|e| UdpCopyClientError::InvalidPacket(e.to_string()))?;
+
+            if self.upstream.ne(&upstream) {
+                return Poll::Ready(Err(UdpCopyClientError::VaryUpstream));
+            }
+            p.set_offset(off);
+            p.set_length(m.len);
+        }
+
+        Poll::Ready(Ok(count))
     }
 }

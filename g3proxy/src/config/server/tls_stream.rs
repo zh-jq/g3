@@ -26,7 +26,7 @@ use g3_types::acl::AclNetworkRuleBuilder;
 use g3_types::collection::SelectivePickPolicy;
 use g3_types::metrics::{MetricsName, StaticMetricsTags};
 use g3_types::net::{
-    OpensslTlsClientConfigBuilder, RustlsServerConfigBuilder, TcpListenConfig, TcpMiscSockOpts,
+    OpensslClientConfigBuilder, RustlsServerConfigBuilder, TcpListenConfig, TcpMiscSockOpts,
     TcpSockSpeedLimitConfig, WeightedUpstreamAddr,
 };
 use g3_yaml::YamlDocPosition;
@@ -45,7 +45,7 @@ pub(crate) struct TlsStreamServerConfig {
     pub(crate) listen: Option<TcpListenConfig>,
     pub(crate) listen_in_worker: bool,
     pub(crate) server_tls_config: RustlsServerConfigBuilder,
-    pub(crate) client_tls_config: Option<OpensslTlsClientConfigBuilder>,
+    pub(crate) client_tls_config: Option<OpensslClientConfigBuilder>,
     pub(crate) ingress_net_filter: Option<AclNetworkRuleBuilder>,
     pub(crate) upstream: Vec<WeightedUpstreamAddr>,
     pub(crate) upstream_pick_policy: SelectivePickPolicy,
@@ -142,7 +142,7 @@ impl TlsStreamServerConfig {
                 if let Yaml::Boolean(enable) = v {
                     if *enable {
                         self.client_tls_config =
-                            Some(OpensslTlsClientConfigBuilder::with_cache_for_one_site());
+                            Some(OpensslClientConfigBuilder::with_cache_for_one_site());
                     }
                 } else {
                     let lookup_dir = g3_daemon::config::get_lookup_dir(self.position.as_ref())?;
@@ -237,7 +237,7 @@ impl TlsStreamServerConfig {
             self.task_idle_check_duration = IDLE_CHECK_MAXIMUM_DURATION;
         }
         if self.client_tls_config.is_some() && self.upstream_tls_name.is_none() {
-            if let Some(upstream) = self.upstream.get(0) {
+            if let Some(upstream) = self.upstream.first() {
                 self.upstream_tls_name = Some(upstream.inner().host().to_string());
             }
         }

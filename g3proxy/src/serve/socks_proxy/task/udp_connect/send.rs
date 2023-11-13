@@ -14,18 +14,23 @@
  * limitations under the License.
  */
 
-use std::io;
+use std::io::{self, IoSlice};
 use std::task::{ready, Context, Poll};
 
-use bytes::BufMut;
-
 use g3_io_ext::{AsyncUdpSend, UdpCopyClientError, UdpCopyClientSend};
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd"
+))]
+use g3_io_ext::{SendMsgHdr, UdpCopyPacket};
 use g3_socks::v5::UdpOutput;
 use g3_types::net::UpstreamAddr;
 
 pub(super) struct Socks5UdpConnectClientSend<T> {
     inner: T,
-    upstream: UpstreamAddr,
+    socks5_header: Vec<u8>,
 }
 
 impl<T> Socks5UdpConnectClientSend<T>
@@ -33,30 +38,31 @@ where
     T: AsyncUdpSend,
 {
     pub(super) fn new(inner: T, upstream: UpstreamAddr) -> Self {
-        Socks5UdpConnectClientSend { inner, upstream }
+        let header_len = UdpOutput::calc_header_len(&upstream);
+        let mut socks5_header = vec![0; header_len];
+        UdpOutput::generate_header(&mut socks5_header, &upstream);
+        Socks5UdpConnectClientSend {
+            inner,
+            socks5_header,
+        }
     }
+}
 
+impl<T> UdpCopyClientSend for Socks5UdpConnectClientSend<T>
+where
+    T: AsyncUdpSend + Send,
+{
     fn poll_send_packet(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-        buf_off: usize,
-        buf_len: usize,
+        buf: &[u8],
     ) -> Poll<Result<usize, UdpCopyClientError>> {
-        let header_len = UdpOutput::calc_header_len(&self.upstream);
-        let nw = if header_len <= buf_off {
-            UdpOutput::generate_header(&mut buf[buf_off - header_len..buf_off], &self.upstream);
-            ready!(self
-                .inner
-                .poll_send(cx, &buf[buf_off - header_len..buf_len]))
-            .map_err(UdpCopyClientError::SendFailed)?
-        } else {
-            let mut new_buf: Vec<u8> = Vec::with_capacity(buf_len - buf_off + header_len);
-            UdpOutput::generate_header(&mut new_buf[0..header_len], &self.upstream);
-            unsafe { new_buf.set_len(header_len) }
-            new_buf.put_slice(&buf[buf_off..buf_len]);
-            ready!(self.inner.poll_send(cx, &new_buf)).map_err(UdpCopyClientError::SendFailed)?
-        };
+        let nw = ready!(self.inner.poll_sendmsg(
+            cx,
+            &[IoSlice::new(&self.socks5_header), IoSlice::new(buf)],
+            None
+        ))
+        .map_err(UdpCopyClientError::SendFailed)?;
         if nw == 0 {
             Poll::Ready(Err(UdpCopyClientError::SendFailed(io::Error::new(
                 io::ErrorKind::WriteZero,
@@ -66,23 +72,34 @@ where
             Poll::Ready(Ok(nw))
         }
     }
-}
 
-impl<T> UdpCopyClientSend for Socks5UdpConnectClientSend<T>
-where
-    T: AsyncUdpSend + Send,
-{
-    fn buf_reserve_length(&self) -> usize {
-        256 + 4 + 2
-    }
-
-    fn poll_send_packet(
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    fn poll_send_packets(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-        buf_off: usize,
-        buf_len: usize,
+        packets: &[UdpCopyPacket],
     ) -> Poll<Result<usize, UdpCopyClientError>> {
-        self.poll_send_packet(cx, buf, buf_off, buf_len)
+        let mut msgs = Vec::with_capacity(packets.len());
+        for p in packets {
+            msgs.push(SendMsgHdr {
+                iov: [IoSlice::new(&self.socks5_header), IoSlice::new(p.payload())],
+                addr: None,
+            });
+        }
+        let count = ready!(self.inner.poll_batch_sendmsg(cx, &msgs))
+            .map_err(UdpCopyClientError::SendFailed)?;
+        if count == 0 {
+            Poll::Ready(Err(UdpCopyClientError::SendFailed(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "write zero packet into sender",
+            ))))
+        } else {
+            Poll::Ready(Ok(count))
+        }
     }
 }

@@ -39,7 +39,8 @@ pub(crate) use registry::{foreach as foreach_resolver, get_handle, get_names};
 
 #[cfg(feature = "c-ares")]
 mod c_ares;
-mod trust_dns;
+#[cfg(feature = "hickory")]
+mod hickory;
 
 mod deny_all;
 mod fail_over;

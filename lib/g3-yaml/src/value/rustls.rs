@@ -245,7 +245,7 @@ pub fn as_rustls_server_config_builder(
 
         crate::foreach_kv(map, |k, v| match crate::key::normalize(k).as_str() {
             "cert_pairs" => {
-                if let Yaml::Array(seq) = value {
+                if let Yaml::Array(seq) = v {
                     for (i, v) in seq.iter().enumerate() {
                         let pair = as_rustls_certificate_pair(v, lookup_dir)
                             .context(format!("invalid rustls cert pair value for {k}#{i}"))?;
@@ -254,7 +254,7 @@ pub fn as_rustls_server_config_builder(
                             .context(format!("invalid rustls cert pair value for {k}#{i}"))?;
                     }
                 } else {
-                    let pair = as_rustls_certificate_pair(value, lookup_dir)
+                    let pair = as_rustls_certificate_pair(v, lookup_dir)
                         .context(format!("invalid rustls cert pair value for key {k}"))?;
                     builder
                         .push_cert_pair(pair)
@@ -278,6 +278,12 @@ pub fn as_rustls_server_config_builder(
                 if enable {
                     builder.enable_client_auth();
                 }
+                Ok(())
+            }
+            "use_session_ticket" => {
+                let enable =
+                    crate::value::as_bool(v).context(format!("invalid value for key {k}"))?;
+                builder.set_use_session_ticket(enable);
                 Ok(())
             }
             "ca_certificate" | "ca_cert" | "client_auth_certificate" | "client_auth_cert" => {

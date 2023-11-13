@@ -15,10 +15,14 @@
  */
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::Arc;
 
-use ::log::{debug, error, warn};
+use ::log::warn;
 use anyhow::{anyhow, Context};
+use tokio::runtime::Handle;
+use tokio::time::Instant;
+
+use g3_histogram::{DurationHistogram, HistogramStats};
 
 pub mod config;
 
@@ -27,61 +31,82 @@ mod build;
 pub mod opts;
 use opts::ProcArgs;
 
+mod stat;
+
 mod backend;
-use backend::OpensslBackend;
+use backend::{BackendStats, OpensslBackend};
 
 mod frontend;
-use frontend::{ResponseData, UdpDgramFrontend};
+use frontend::{FrontendStats, ResponseData, UdpDgramFrontend};
+use g3_types::ext::DurationExt;
+
+struct BackendRequest {
+    host: String,
+    peer: SocketAddr,
+    recv_time: Instant,
+}
+
+struct BackendResponse {
+    data: ResponseData,
+    peer: SocketAddr,
+    recv_time: Instant,
+}
+
+impl BackendRequest {
+    fn response(&self, data: ResponseData) -> BackendResponse {
+        BackendResponse {
+            data,
+            peer: self.peer,
+            recv_time: self.recv_time,
+        }
+    }
+}
+
+impl BackendResponse {
+    fn duration(&self) -> u64 {
+        self.recv_time.elapsed().as_nanos_u64()
+    }
+}
 
 pub async fn run(proc_args: &ProcArgs) -> anyhow::Result<()> {
-    let (req_sender, req_receiver) = flume::bounded::<(String, SocketAddr)>(1024);
-    let (rsp_sender, rsp_receiver) = flume::bounded::<(ResponseData, SocketAddr)>(1024);
+    let (req_sender, req_receiver) = flume::bounded::<BackendRequest>(1024);
+    let (rsp_sender, rsp_receiver) = flume::bounded::<BackendResponse>(1024);
 
     let backend_config =
         config::get_backend_config().ok_or_else(|| anyhow!("no backend config available"))?;
+    let backend_stats = Arc::new(BackendStats::default());
 
-    g3_daemon::runtime::worker::foreach(|h| {
-        let id = h.id;
-        let mut backend = OpensslBackend::new(&backend_config)
-            .context(format!("failed to build backend {id}"))?;
-        let req_receiver = req_receiver.clone();
-        let rsp_sender = rsp_sender.clone();
+    let duration_stats = if backend_config.request_duration_quantile.is_empty() {
+        Arc::new(HistogramStats::new())
+    } else {
+        Arc::new(HistogramStats::with_quantiles(
+            &backend_config.request_duration_quantile,
+        ))
+    };
+    let (histogram, recorder) = DurationHistogram::<u64>::new();
+    histogram.spawn_refresh(duration_stats.clone());
 
-        h.handle.spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300));
-
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        if let Err(e) = backend.refresh() {
-                            warn!("failed to refresh backend: {e:?}");
-                        }
-                    }
-                    r = req_receiver.recv_async() => {
-                        let Ok((host, peer_addr)) = r else {
-                            break
-                        };
-
-                        match backend.generate(&host) {
-                            Ok(data) => {
-                                debug!("Worker#{id} got certificate for host {host}");
-                                if let Err(e) = rsp_sender.send_async((data, peer_addr)).await {
-                                    error!(
-                                        "Worker#{id} failed to send certificate for host {host} to frontend: {e}"
-                                    );
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Worker#{id} generate for {host} failed: {e:?}");
-                            }
-                        }
-                    }
-                }
-            }
-        });
+    let workers = g3_daemon::runtime::worker::foreach(|h| {
+        let backend = OpensslBackend::new(&backend_config, &backend_stats)
+            .context(format!("failed to build backend for worker {}", h.id))?;
+        backend.spawn(&h.handle, h.id, req_receiver.clone(), rsp_sender.clone());
         Ok::<(), anyhow::Error>(())
     })?;
+    if workers < 1 {
+        let backend = OpensslBackend::new(&backend_config, &backend_stats)
+            .context("failed to build backend for main runtime")?;
+        backend.spawn(&Handle::current(), 0, req_receiver, rsp_sender);
+    }
+
+    let frontend_stats = Arc::new(FrontendStats::default());
+    if let Some(stats_config) = g3_daemon::stat::config::get_global_stat_config() {
+        stat::spawn_working_thread(
+            stats_config,
+            backend_stats,
+            duration_stats,
+            frontend_stats.clone(),
+        )?;
+    }
 
     if let Some(addr) = proc_args.udp_addr {
         let frontend = UdpDgramFrontend::new(addr).await?;
@@ -91,24 +116,37 @@ pub async fn run(proc_args: &ProcArgs) -> anyhow::Result<()> {
         loop {
             tokio::select! {
                 r = frontend.recv_req(&mut rcv_buf) => {
+                    frontend_stats.add_request_total();
+                    let recv_time = Instant::now();
                     match r {
-                        Ok((len, peer_addr)) => match crate::frontend::decode_req(&rcv_buf[0..len]) {
+                        Ok((len, peer)) => match crate::frontend::decode_req(&rcv_buf[0..len]) {
                             Ok(host) => {
-                                if let Err(e) = req_sender.send_async((host, peer_addr)).await {
+                                let req = BackendRequest {host, peer, recv_time};
+                                if let Err(e) = req_sender.send_async(req).await {
                                     return Err(anyhow!("failed to send request to backend: {e}"));
                                 }
                             }
-                            Err(e) => warn!("FG#0 invalid request from peer {peer_addr}: {e:?}"),
+                            Err(e) => {
+                                frontend_stats.add_request_invalid();
+                                warn!("invalid request from peer {peer}: {e:?}");
+                            }
                         }
                         Err(e) => return Err(anyhow!("frontend recv error: {e:?}")),
                     }
                 }
                 r = rsp_receiver.recv_async() => {
                     match r {
-                        Ok((data, peer_addr)) => match data.encode() {
+                        Ok(rsp) => match rsp.data.encode() {
                             Ok(buf) => {
-                                if let Err(e) = frontend.send_rsp(buf.as_slice(), peer_addr).await {
-                                    warn!("FG#0 write response back error: {e:?}");
+                                frontend_stats.add_response_total();
+                                match frontend.send_rsp(buf.as_slice(), rsp.peer).await {
+                                    Ok(_) => {
+                                        let _ = recorder.record(rsp.duration());
+                                    }
+                                    Err(e) => {
+                                        frontend_stats.add_response_fail();
+                                        warn!("write response back error: {e:?}");
+                                    }
                                 }
                             }
                             Err(e) => return Err(anyhow!("response encode error: {e:?}")),

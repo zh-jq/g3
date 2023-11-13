@@ -17,7 +17,6 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rand::Rng;
 use tokio::runtime::Handle;
 
 use g3_runtime::unaided::WorkersGuard;
@@ -38,7 +37,7 @@ thread_local! {
 pub async fn spawn_workers() -> anyhow::Result<Option<WorkersGuard>> {
     if let Some(config) = crate::runtime::config::get_worker_config() {
         let guard = config
-            .start(&|id, handle| unsafe { WORKER_HANDLERS.push(WorkerHandle { handle, id }) })
+            .start(|id, handle| unsafe { WORKER_HANDLERS.push(WorkerHandle { handle, id }) })
             .await?;
         Ok(Some(guard))
     } else {
@@ -61,16 +60,13 @@ pub fn select_handle() -> Option<WorkerHandle> {
     match handles.len() {
         0 => None,
         1 => Some(handles[0].clone()),
-        n => WORKER_RR_INDEX.with(|cell| {
-            let mut id = cell.borrow().map(|v| v + 1).unwrap_or_else(|| {
-                let mut rng = rand::thread_rng();
-                rng.gen_range(0..n)
-            });
+        n => WORKER_RR_INDEX.with_borrow_mut(|cell| {
+            let mut id = cell.map(|v| v + 1).unwrap_or_else(|| fastrand::usize(0..n));
             if id >= n {
                 id = 0;
             }
             let handle = unsafe { handles.get_unchecked(id).clone() };
-            *cell.borrow_mut() = Some(id);
+            *cell = Some(id);
             Some(handle)
         }),
     }
@@ -101,12 +97,14 @@ pub fn select_listen_handle() -> Option<WorkerHandle> {
     }
 }
 
-pub fn foreach<F, E>(spawn: F) -> Result<(), E>
+pub fn foreach<F, E>(spawn: F) -> Result<usize, E>
 where
     F: Fn(&WorkerHandle) -> Result<(), E>,
 {
+    let mut count = 0;
     for handle in handles() {
         spawn(handle)?;
+        count += 1;
     }
-    Ok(())
+    Ok(count)
 }
