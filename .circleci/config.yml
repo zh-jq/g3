@@ -1,0 +1,61 @@
+version: 2.1
+
+orbs:
+  rust: circleci/rust@1.8.0
+
+jobs:
+  build-deb:
+    parameters:
+      image:
+        type: string
+      class:
+        type: string
+    docker:
+      - image: << parameters.image >>
+    resource_class: << parameters.class >>
+    steps:
+      - checkout
+      - rust/install:
+          version: stable
+  build-rpm:
+    parameters:
+      image:
+        type: string
+      class:
+        type: string
+    docker:
+      - image: << parameters.image >>
+    resource_class: << parameters.class >>
+    steps:
+      - checkout
+      - rust/install:
+          version: stable
+
+workflows:
+  build-deb:
+    jobs:
+      - build-deb:
+          matrix:
+            parameters:
+              class:
+                - large
+                - arm.medium
+              image:
+                - debian:trixie
+                - debian:bookworm
+                - debian:bullseye
+                - ubuntu:24.04
+                - ubuntu:22.04
+  build-rpm:
+    jobs:
+      - build-rpm:
+          matrix:
+            parameters:
+              class:
+                - large
+                - arm.medium
+              image:
+                - rockylinux/rockylinux:10-minimal
+                - rockylinux/rockylinux:9-minimal
+                - rockylinux/rockylinux:8-minimal
+                # - opensuse/leap:15.6
